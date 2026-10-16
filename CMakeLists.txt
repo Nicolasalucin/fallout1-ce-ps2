@@ -23,6 +23,18 @@ set(CMAKE_CXX_EXTENSIONS NO)
 option(ASAN "Enable address sanitizer" OFF)
 option(UBSAN "Enable undefined behaviour sanitizer" OFF)
 
+# ---------------------------------------------------------------------------
+# PlayStation 2 port (native build against PS2SDK).
+#
+# Enabled automatically by cmake/toolchain-ps2.cmake (which sets PS2=TRUE) or
+# manually with -DPS2_BUILD=ON for inspection. See README.md for the Docker
+# build command.
+# ---------------------------------------------------------------------------
+option(PS2_BUILD "Build for the PlayStation 2 (PS2SDK cross toolchain)" OFF)
+if(PS2_BUILD)
+    set(PS2 TRUE)
+endif()
+
 if (ANDROID)
     add_library(${EXECUTABLE_NAME} SHARED)
 else()
@@ -253,7 +265,6 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/plib/gnw/text.h"
     "src/plib/gnw/vcr.cc"
     "src/plib/gnw/vcr.h"
-    "src/plib/gnw/winmain.cc"
     "src/plib/gnw/winmain.h"
     "src/movie_lib.cc"
     "src/movie_lib.h"
@@ -271,6 +282,68 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/plib/gnw/touch.cc"
     "src/plib/gnw/touch.h"
 )
+
+# winmain.cc declares the desktop SDL entry point; on PS2 the platform layer
+# provides its own main() (src/platform/ps2/main.cc) so the platform can be
+# brought up before the engine starts.
+if(NOT PS2)
+    target_sources(${EXECUTABLE_NAME} PUBLIC
+        "src/plib/gnw/winmain.cc"
+    )
+endif()
+
+if(PS2)
+    # Native PlayStation 2 platform layer (C99) + two C++ shims (entry point
+    # and the SDL2-subset implementation).
+    target_sources(${EXECUTABLE_NAME} PRIVATE
+        "src/platform/ps2/main.cc"
+        "src/platform/ps2/boot.c"
+        "src/platform/ps2/ps2_time.c"
+        "src/platform/ps2/input_pad.c"
+        "src/platform/ps2/video_gs.c"
+        "src/platform/ps2/sdl/sdl_shim.c"
+    )
+
+    # The SDL2-subset shim (src/platform/ps2/sdl/SDL.h) must win over any
+    # other SDL.h on the include path.
+    target_include_directories(${EXECUTABLE_NAME} BEFORE PRIVATE "src/platform/ps2/sdl")
+    target_include_directories(${EXECUTABLE_NAME} PRIVATE "src/platform/ps2")
+
+    target_compile_options(${EXECUTABLE_NAME} PRIVATE
+        -Wcast-align=strict
+        -fno-strict-aliasing
+    )
+
+    # Requested optimization profile for the EE (R5900 has no hardware FP64).
+    # NOTE: -fsingle-precision-constant is applied only to the PS2 platform
+    # layer (see below), not to the upstream engine: turning every floating
+    # literal into `float` breaks upstream code (e.g. std::clamp<double>
+    # overload resolution in game/options.cc).
+    target_compile_options(${EXECUTABLE_NAME} PRIVATE
+        $<$<CONFIG:Release>:-ffast-math>
+    )
+
+    # PS2 platform layer: single-precision floating constants are fine here.
+    # -Wno-cast-align: this layer deliberately casts between byte buffers and
+    # typed DMA/audio buffers (all accesses are statically aligned in
+    # practice); the strict cast-align audit stays enabled for the engine.
+    set_source_files_properties(
+        src/platform/ps2/boot.c
+        src/platform/ps2/ps2_time.c
+        src/platform/ps2/input_pad.c
+        src/platform/ps2/video_gs.c
+        src/platform/ps2/sdl/sdl_shim.c
+        PROPERTIES COMPILE_OPTIONS "-fsingle-precision-constant;-Wno-cast-align"
+    )
+
+    # Platform libraries: gsKit (+ DMA/kit utilities), GS graph primitives.
+    target_link_libraries(${EXECUTABLE_NAME}
+        gskit
+        dmakit
+        graph
+        m
+    )
+endif()
 
 if(IOS)
     target_sources(${EXECUTABLE_NAME} PUBLIC
@@ -345,10 +418,15 @@ if(APPLE)
     set(MACOSX_BUNDLE_BUNDLE_VERSION "1.0.0")
 endif()
 
-if((NOT ${CMAKE_SYSTEM_NAME} MATCHES "Linux") AND (NOT ${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD") AND (NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD"))
-    add_subdirectory("third_party/sdl2")
-else()
-    find_package(SDL2)
+if(NOT PS2)
+    if((NOT ${CMAKE_SYSTEM_NAME} MATCHES "Linux") AND (NOT ${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD") AND (NOT ${CMAKE_SYSTEM_NAME} MATCHES "OpenBSD"))
+        add_subdirectory("third_party/sdl2")
+    else()
+        find_package(SDL2)
+    endif()
+
+    target_link_libraries(${EXECUTABLE_NAME} ${SDL2_LIBRARIES})
+    target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_INCLUDE_DIRS})
 endif()
 
 add_subdirectory("third_party/adecode")
@@ -356,9 +434,6 @@ target_link_libraries(${EXECUTABLE_NAME} adecode::adecode)
 
 add_subdirectory("third_party/fpattern")
 target_link_libraries(${EXECUTABLE_NAME} fpattern::fpattern)
-
-target_link_libraries(${EXECUTABLE_NAME} ${SDL2_LIBRARIES})
-target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_INCLUDE_DIRS})
 
 if(APPLE)
     if(IOS)

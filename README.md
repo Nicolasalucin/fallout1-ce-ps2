@@ -63,7 +63,7 @@ legal copy of Fallout to use this software (see
 Work in progress (native port under construction):
 
 - [x] F0 — Repository setup, legal hygiene, cross-build pipeline (Docker)
-- [ ] F1 — Full engine compiles for MIPS / platform stubs
+- [x] F1 — Full engine compiles for MIPS / platform stubs
 - [ ] F2 — Video: 8-bit framebuffer via gsKit (T8 + CLUT), 60 Hz present
 - [ ] F3 — Input: DualShock 2, cursor, on-screen keyboard, timers
 - [ ] F4 — I/O: fileXio, block cache, `host:` / `mass:` / `hdd0:` probing

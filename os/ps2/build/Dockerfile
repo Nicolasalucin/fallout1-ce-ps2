@@ -16,4 +16,5 @@
 # ---------------------------------------------------------------------------
 FROM ps2dev/ps2dev:latest
 
-RUN apk add --no-cache cmake make ninja
+# git + ca-certificates are needed by CMake FetchContent (adecode, fpattern).
+RUN apk add --no-cache cmake make ninja git ca-certificates
