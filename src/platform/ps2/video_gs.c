@@ -18,6 +18,7 @@
 
 #include "ps2_video.h"
 #include "ps2_time.h"
+#include "sdl/ps2_sdl_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -274,6 +275,10 @@ void ps2_video_selftest(void)
     for (int frame = 0; frame < 120; frame++) {
         int col = (frame * 8) % PS2_SCR_W;
 
+        /* Drive the platform input layer while the engine is not running
+         * yet (boot demo); the engine pumps events by itself later. */
+        SDL_PumpEvents();
+
         rotation = frame / 30;
         if (rotation != last_rotation) {
             selftest_build(pattern, rotation);
@@ -365,5 +370,28 @@ void ps2_video_selftest(void)
         }
         t1 = ps2_time_ms();
         printf("[ps2] probe: upload+vsync x120 -> %u ms\n", (unsigned)(t1 - t0));
+    }
+
+    /* Input window: keep presenting at 60 Hz while pumping events so the pad
+     * layer is polled and its transitions are logged. Temporary F3 harness;
+     * F8 replaces this with the real boot/mod menu. */
+    {
+        u32 t0 = ps2_time_ms();
+
+        printf("[ps2] selftest: input window (600 frames)\n");
+        for (int frame = 0; frame < 600; frame++) {
+            SDL_PumpEvents();
+
+            s_texture.Mem = (u32*)pattern;
+            gsKit_texture_upload(s_gs, &s_texture);
+            gsKit_clear(s_gs, GS_SETREG_RGBAQ(0, 0, 0, 0, 0));
+            gsKit_prim_sprite_texture_3d(s_gs, &s_texture,
+                0.0f, 0.0f, 1, 0.0f, 0.0f,
+                (float)PS2_OUT_W, (float)PS2_OUT_H, 1, (float)PS2_SCR_W, (float)PS2_SCR_H,
+                GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0));
+            gsKit_queue_exec(s_gs);
+            gsKit_sync_flip(s_gs);
+        }
+        printf("[ps2] selftest: input window done (%u ms)\n", (unsigned)(ps2_time_ms() - t0));
     }
 }

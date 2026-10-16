@@ -336,11 +336,13 @@ if(PS2)
         PROPERTIES COMPILE_OPTIONS "-fsingle-precision-constant;-Wno-cast-align"
     )
 
-    # Platform libraries: gsKit (+ DMA/kit utilities), GS graph primitives.
+    # Platform libraries: gsKit (+ DMA/kit utilities), GS graph primitives,
+    # libpad for DualShock 2 input.
     target_link_libraries(${EXECUTABLE_NAME}
         gskit
         dmakit
         graph
+        pad
         m
     )
 

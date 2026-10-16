@@ -64,11 +64,11 @@ Work in progress (native port under construction):
 
 - [x] F0 — Repository setup, legal hygiene, cross-build pipeline (Docker)
 - [x] F1 — Full engine compiles for MIPS / platform stubs
-- [ ] F2 — Video: 8-bit framebuffer via gsKit (T8 + CLUT), 60 Hz present
-- [ ] F3 — Input: DualShock 2, cursor, on-screen keyboard, timers
+- [x] F2 — Video: 8-bit framebuffer via gsKit (T8 + CLUT), 60 Hz present
+- [x] F3 — Input: DualShock 2 (libpad, analog mode, accelerated cursor; verified with a virtual pad)
 - [ ] F4 — I/O: fileXio, block cache, `host:` / `mass:` / `hdd0:` probing
 - [ ] F5 — Audio: audsrv streaming (ACM music / voices / SFX)
-- [ ] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + icons
+- [ ] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + icons + on-screen keyboard
 - [ ] F7 — Memory: arena allocator, caches capped to fit 32 MB RDRAM
 - [ ] F8 — Mod loader + boot menu
 - [ ] F9 — Hardware hardening (USB / MX4SIO / HDD)
@@ -146,14 +146,16 @@ The result is `fallout1-ce.elf` in the repository root. Copy it to your
 | Input | Action |
 | --- | --- |
 | Left stick | Mouse cursor (acceleration curve) |
-| Right stick | Scroll map / worldmap |
-| ✕ | Left click |
-| ○ | Right click / cycle cursor mode |
-| L1 | Cycle active weapon |
-| R1 | Pip-Boy |
-| L2 | Inventory |
-| R2 | End turn |
-| D-Pad | Scroll view |
+| Right stick | Scroll wheel (lists / world map) |
+| ✕ Cross | Left click / confirm |
+| ○ Circle | Right click / interact |
+| □ Square | Change active hand (B) |
+| △ Triangle | Automap (Tab) |
+| L1 | Attack mode / reload (N) |
+| R1 | Pip-Boy (P) |
+| L2 | Inventory (I) |
+| R2 | End turn / skip dialog (Space) |
+| D-Pad | Arrow keys (move / navigate) |
 | START | Game menu (Esc) |
 | SELECT | Character sheet (C) |
 
@@ -303,14 +305,16 @@ El resultado es `fallout1-ce.elf` en la raíz del repositorio. Cópialo a
 | Entrada | Acción |
 | --- | --- |
 | Stick izquierdo | Cursor del ratón (con curva de aceleración) |
-| Stick derecho | Scroll de mapa / mapa del mundo |
-| ✕ | Clic izquierdo |
-| ○ | Clic derecho / cambiar modo de cursor |
-| L1 | Cambiar arma activa |
-| R1 | Pip-Boy |
-| L2 | Inventario |
-| R2 | Fin de turno |
-| D-Pad | Scroll de vista |
+| Stick derecho | Rueda de scroll (listas / mapa del mundo) |
+| ✕ Cruz | Clic izquierdo / confirmar |
+| ○ Círculo | Clic derecho / interactuar |
+| □ Cuadrado | Cambiar mano activa (B) |
+| △ Triángulo | Automapa (Tab) |
+| L1 | Modo de ataque / recarga (N) |
+| R1 | Pip-Boy (P) |
+| L2 | Inventario (I) |
+| R2 | Fin de turno / saltar diálogo (Espacio) |
+| D-Pad | Flechas (moverse / navegar) |
 | START | Menú del juego (Esc) |
 | SELECT | Hoja de personaje (C) |
 
