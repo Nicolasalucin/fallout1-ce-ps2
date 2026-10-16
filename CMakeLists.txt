@@ -275,7 +275,6 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/audio_engine.h"
     "src/fps_limiter.cc"
     "src/fps_limiter.h"
-    "src/platform_compat.cc"
     "src/platform_compat.h"
     "src/pointer_registry.cc"
     "src/pointer_registry.h"
@@ -285,10 +284,12 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
 
 # winmain.cc declares the desktop SDL entry point; on PS2 the platform layer
 # provides its own main() (src/platform/ps2/main.cc) so the platform can be
-# brought up before the engine starts.
+# brought up before the engine starts. platform_compat.cc is likewise replaced
+# on PS2 by src/platform/ps2/platform_compat_ps2.cc (device-aware paths).
 if(NOT PS2)
     target_sources(${EXECUTABLE_NAME} PUBLIC
         "src/plib/gnw/winmain.cc"
+        "src/platform_compat.cc"
     )
 endif()
 
@@ -301,6 +302,8 @@ if(PS2)
         "src/platform/ps2/ps2_time.c"
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
+        "src/platform/ps2/fs.c"
+        "src/platform/ps2/platform_compat_ps2.cc"
         "src/platform/ps2/sdl/sdl_shim.c"
     )
 
@@ -332,6 +335,8 @@ if(PS2)
         src/platform/ps2/ps2_time.c
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
+        src/platform/ps2/fs.c
+        src/platform/ps2/platform_compat_ps2.cc
         src/platform/ps2/sdl/sdl_shim.c
         PROPERTIES COMPILE_OPTIONS "-fsingle-precision-constant;-Wno-cast-align"
     )

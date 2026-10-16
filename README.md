@@ -66,7 +66,7 @@ Work in progress (native port under construction):
 - [x] F1 — Full engine compiles for MIPS / platform stubs
 - [x] F2 — Video: 8-bit framebuffer via gsKit (T8 + CLUT), 60 Hz present
 - [x] F3 — Input: DualShock 2 (libpad, analog mode, accelerated cursor; verified with a virtual pad)
-- [ ] F4 — I/O: fileXio, block cache, `host:` / `mass:` / `hdd0:` probing
+- [x] F4 — I/O: device probing (`host:` / `mass:` / `hdd0:`), case-insensitive paths, block buffering for the big `.dat` files
 - [ ] F5 — Audio: audsrv streaming (ACM music / voices / SFX)
 - [ ] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + icons + on-screen keyboard
 - [ ] F7 — Memory: arena allocator, caches capped to fit 32 MB RDRAM
@@ -121,9 +121,12 @@ The USB stick must be FAT32. MX4SIO exposes the SD card as `mass:` as well.
 - Put the same layout in this repository's `local_assets/` folder
   (ignored by git).
 - In PCSX2: **Settings → Emulation → Enable Host Filesystem**.
-- Boot `fallout1-ce.elf` from the repository root with
-  **System → Boot ELF**; the `host:` device then resolves to the repository
-  folder, so the game reads `host:local_assets/`.
+- Boot `fallout1-ce.elf` with **System → Boot ELF**, keeping it in the folder
+  that contains `local_assets/` (e.g. the repository root). PCSX2 resolves
+  `host:` to the **folder of the booted ELF**, so the game reads
+  `host:local_assets/`.
+- Development tip (ELF inside `build_ps2/`): symlink the assets next to it
+  once with `ln -s ../local_assets build_ps2/local_assets`.
 
 ## Building
 
@@ -236,6 +239,23 @@ copyright: ni `MASTER.DAT`, ni `CRITTER.DAT`, ni gráficos, sonido, música,
 vídeos, textos o datos de Fallout. Debes poseer una copia legal de Fallout
 para usar este software (ver [Cómo usar tus propios datos legales]).
 
+## Estado
+
+Trabajo en curso (port nativo en construcción):
+
+- [x] F0 — Preparación del repositorio, higiene legal, build cruzado (Docker)
+- [x] F1 — El motor completo compila para MIPS / stubs de plataforma
+- [x] F2 — Vídeo: framebuffer de 8 bits con gsKit (T8 + CLUT), presentado a 60 Hz
+- [x] F3 — Entrada: DualShock 2 (libpad, modo analógico, cursor acelerado)
+- [x] F4 — E/S: sondeo de `host:` / `mass:` / `hdd0:`, rutas sin distinguir
+  mayúsculas, búfer por bloques para los `.dat` grandes
+- [ ] F5 — Audio: streaming por audsrv (voces, SFX y música `.ACM`)
+- [ ] F6 — Guardados en tarjeta de memoria (`mc0:/FALLOUT1_Sxx`) + iconos +
+  teclado en pantalla
+- [ ] F7 — Memoria: asignador de arena, cachés ajustadas a los 32 MB de RDRAM
+- [ ] F8 — Cargador de mods + menú de arranque
+- [ ] F9 — Robustez en hardware real (USB / MX4SIO / HDD)
+
 ## Bring Your Own Game (usa tus propios datos)
 
 Necesitas los ficheros de datos originales. **Formas legales de obtenerlos:**
@@ -279,9 +299,12 @@ El pendrive debe estar en FAT32. MX4SIO expone la SD como `mass:` también.
 - Coloca el mismo contenido en la carpeta `local_assets/` del repositorio
   (ignorada por git).
 - En PCSX2: **Settings → Emulation → Enable Host Filesystem**.
-- Arranca `fallout1-ce.elf` desde la raíz del repositorio con
-  **System → Boot ELF**; el dispositivo `host:` apunta entonces a la carpeta
-  del repositorio y el juego lee `host:local_assets/`.
+- Arranca `fallout1-ce.elf` con **System → Boot ELF**, manteniéndolo en la
+  carpeta que contiene `local_assets/` (p. ej. la raíz del repositorio). PCSX2
+  resuelve `host:` a la **carpeta del ELF arrancado**, así que el juego lee
+  `host:local_assets/`.
+- Truco para desarrollo (ELF dentro de `build_ps2/`): enlaza los datos una vez
+  con `ln -s ../local_assets build_ps2/local_assets`.
 
 ## Compilación
 
