@@ -17,6 +17,7 @@
 #include <stdio.h>
 
 #include "game/main.h"
+#include "ps2_video.h"
 
 extern "C" int ps2_boot(void);
 
@@ -33,6 +34,10 @@ int main(int argc, char* argv[])
         printf("[ps2] boot failed\n");
         return 1;
     }
+
+    /* Boot diagnostics: brings the GS up and validates frame pacing.
+     * Replaced by the mod-loader boot menu in F8. */
+    ps2_video_selftest();
 
     int rc = fallout::gnw_main(argc, argv);
 

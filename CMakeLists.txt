@@ -343,6 +343,13 @@ if(PS2)
         graph
         m
     )
+
+    # Canonical PS2 artifact name: fallout1-ce.elf (PCSX2 needs the .elf
+    # extension to boot the file directly).
+    set_target_properties(${EXECUTABLE_NAME} PROPERTIES
+        OUTPUT_NAME "fallout1-ce"
+        SUFFIX ".elf"
+    )
 endif()
 
 if(IOS)
