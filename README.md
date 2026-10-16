@@ -1,115 +1,341 @@
-# Fallout Community Edition
+# Fallout for PlayStation 2 — Community Edition (native port)
 
-Fallout Community Edition is a fully working re-implementation of Fallout, with the same original gameplay, engine bugfixes, and some quality of life improvements, that works (mostly) hassle-free on multiple platforms.
+**English** | [Español](#español)
 
-There is also [Fallout 2 Community Edition](https://github.com/alexbatalov/fallout2-ce).
+A **native PlayStation 2 port** of the Fallout 1 engine, based on
+[**fallout1-ce**](https://github.com/alexbatalov/fallout1-ce) by
+[Alexander Batalov (`alexbatalov`)](https://github.com/alexbatalov) and its
+contributors. The engine is compiled for the Emotion Engine (MIPS R5900)
+against **PS2SDK** (gsKit, libpad, audsrv, fileXio, libmc) and runs on real
+hardware (FMCB/OPL) and on PCSX2.
 
-## Installation
+A Fallout 2 CE port is planned as a second target reusing the same platform
+layer.
 
-You must own the game to play. Purchase your copy on [GOG](https://www.gog.com/game/fallout) or [Steam](https://store.steampowered.com/app/38400). Download latest [release](https://github.com/alexbatalov/fallout1-ce/releases) or build from source. You can also check latest [debug](https://github.com/alexbatalov/fallout1-ce/actions) build intended for testers.
+> **Disclaimer:** This is an unofficial, non-commercial fan project. It is not
+> affiliated with, endorsed by, or supported by Bethesda Softworks, Interplay,
+> or the creators of the original Fallout. "Fallout" is a trademark of its
+> respective owners.
 
-### Windows
+---
 
-Download and copy `fallout-ce.exe` to your `Fallout` folder. It serves as a drop-in replacement for `falloutw.exe`.
+## ⚠️ Modified work notice
 
-### Linux
+This repository contains a **modified version** of
+[fallout1-ce](https://github.com/alexbatalov/fallout1-ce) (Sustainable Use
+License v1.0). Modifications made here:
 
-- Use Windows installation as a base - it contains data assets needed to play. Copy `Fallout` folder somewhere, for example `/home/john/Desktop/Fallout`.
+- Added a native PlayStation 2 platform layer (`src/platform/ps2/`, in C99):
+  video (gsKit, 8-bit indexed framebuffer `GS_PSM_T8` + `GS_PSM_CT32` CLUT),
+  input (libpad / DualShock 2), audio (audsrv), file I/O (fileXio), Memory
+  Card saving (mcman/mcserv + `icon.sys` generation), static arena allocator
+  and a mod loader with boot menu.
+- Replaced the SDL2 backend with PS2-specific implementations of the engine's
+  existing platform interfaces (`svga`, `audio_engine`, input, timers).
+- Build system changes for cross-compilation with the ps2dev toolchain.
 
-- Alternatively you can extract the needed files from the GoG installer:
+The original license text is kept unmodified in [LICENSE.md](LICENSE.md).
+
+## Credits
+
+Huge thanks to:
+
+- **[Alexander Batalov (`alexbatalov`)]** — author of
+  [fallout1-ce](https://github.com/alexbatalov/fallout1-ce) and
+  [fallout2-ce](https://github.com/alexbatalov/fallout2-ce), the clean
+  re-implementation of the Fallout engines this port is built upon. All engine
+  work, bugfixes and the Reverse-Engineering foundation are his and his
+  contributors' work.
+- **fallout1-ce / fallout2-ce contributors** — see the upstream repositories.
+- **PS2SDK / ps2dev / gsKit authors and community** — for the toolchain,
+  drivers and libraries that make PS2 homebrew possible.
+
+## Legal / no game assets
+
+This repository contains **only source code**. It does **not** contain any
+copyrighted game material: no `MASTER.DAT`, no `CRITTER.DAT`, no graphics,
+sound, music, movies, text or data of any kind from Fallout. You must own a
+legal copy of Fallout to use this software (see
+[Bring Your Own Game](#bring-your-own-game-byo)).
+
+## Status
+
+Work in progress (native port under construction):
+
+- [x] F0 — Repository setup, legal hygiene, cross-build pipeline (Docker)
+- [ ] F1 — Full engine compiles for MIPS / platform stubs
+- [ ] F2 — Video: 8-bit framebuffer via gsKit (T8 + CLUT), 60 Hz present
+- [ ] F3 — Input: DualShock 2, cursor, on-screen keyboard, timers
+- [ ] F4 — I/O: fileXio, block cache, `host:` / `mass:` / `hdd0:` probing
+- [ ] F5 — Audio: audsrv streaming (ACM music / voices / SFX)
+- [ ] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + icons
+- [ ] F7 — Memory: arena allocator, caches capped to fit 32 MB RDRAM
+- [ ] F8 — Mod loader + boot menu
+- [ ] F9 — Hardware hardening (USB / MX4SIO / HDD)
+
+---
+
+## Bring Your Own Game (BYO)
+
+You need the original game data files. **Legal ways to get them:**
+
+### From Steam
+
+1. Install Fallout (1997) from Steam (App ID 38400).
+2. Right click the game in your library → **Manage → Browse local files**.
+3. Copy these files/folders from the game directory:
+   - `MASTER.DAT`
+   - `CRITTER.DAT`
+   - the `data` folder (contains `sound/`, `music/`, etc.)
+
+### From GOG
+
+1. Install Fallout using GOG Galaxy, or extract the offline installer:
+
+   ```console
+   $ sudo apt install innoextract
+   $ innoextract setup_fallout_2.1.0.18.exe -I app
+   ```
+
+2. Use the contents of the extracted `app` folder. Same files as above.
+
+You can also prepare the data on Linux directly from your Steam installation
+(`~/.steam/steam/steamapps/common/Fallout` or the "compatdata" prefix).
+
+### Where to put the files
+
+**On a real PS2 (USB stick / MX4SIO / HDD):**
+
+```
+mass:/FALLOUT/MASTER.DAT
+mass:/FALLOUT/CRITTER.DAT
+mass:/FALLOUT/data/...
+mass:/FALLOUT/mods/...        (optional)
+mass:/FALLOUT/saves/...       (fallback save location)
+```
+
+The USB stick must be FAT32. MX4SIO exposes the SD card as `mass:` as well.
+
+**On PCSX2 (recommended for development/fast testing):**
+
+- Put the same layout in this repository's `local_assets/` folder
+  (ignored by git).
+- In PCSX2: **Settings → Emulation → Enable Host Filesystem**.
+- Boot `fallout1-ce.elf` from the repository root with
+  **System → Boot ELF**; the `host:` device then resolves to the repository
+  folder, so the game reads `host:local_assets/`.
+
+## Building
+
+Cross-compilation uses the official ps2dev toolchain in Docker (no local SDK
+needed). The upstream `ps2dev/ps2dev` image ships only the bare toolchain, so
+this repository provides a tiny derived image that adds `cmake`, `make` and
+`ninja`, plus a vendored, modernized toolchain file:
 
 ```console
-$ sudo apt install innoextract
-$ innoextract ~/Downloads/setup_fallout_2.1.0.18.exe -I app
-$ mv app Fallout
+docker build -t fallout-ce-ps2-build os/ps2/build
+docker run --rm -v "$(pwd):/src" -w /src fallout-ce-ps2-build sh -c \
+  "cmake -B build_ps2 -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-ps2.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build build_ps2 -j\$(nproc)"
 ```
 
-- Download and copy `fallout-ce` to this folder.
+The result is `fallout1-ce.elf` in the repository root. Copy it to your
+`mass:/FALLOUT/` folder (console) or boot it with PCSX2 (emulator).
 
-- Install [SDL2](https://libsdl.org/download-2.0.php):
+## Controls (DualShock 2)
 
-```console
-$ sudo apt install libsdl2-2.0-0
+| Input | Action |
+| --- | --- |
+| Left stick | Mouse cursor (acceleration curve) |
+| Right stick | Scroll map / worldmap |
+| ✕ | Left click |
+| ○ | Right click / cycle cursor mode |
+| L1 | Cycle active weapon |
+| R1 | Pip-Boy |
+| L2 | Inventory |
+| R2 | End turn |
+| D-Pad | Scroll view |
+| START | Game menu (Esc) |
+| SELECT | Character sheet (C) |
+
+## Saving
+
+Saves use flat folders on the Memory Card, one per slot (the PS2 browser
+does not support nested save folders):
+
+```
+mc0:/FALLOUT1_S01/ … FALLOUT1_S10/   each with SAVE.DAT, icon.sys, icon.icn
 ```
 
-- Run `./fallout-ce`.
+If no Memory Card is present (or it is full), the game falls back to
+`mass:/FALLOUT/saves/` and, on PCSX2, `host:local_assets/saves/`.
 
-### macOS
+## Mods
 
-> **NOTE**: macOS 10.11 (El Capitan) or higher is required. Runs natively on Intel-based Macs and Apple Silicon.
-
-- Use Windows installation as a base - it contains data assets needed to play. Copy `Fallout` folder somewhere, for example `/Applications/Fallout`.
-
-- Alternatively you can use Fallout from MacPlay/The Omni Group as a base - you need to extract game assets from the original bundle. Mount CD/DMG, right click `Fallout` -> `Show Package Contents`, navigate to `Contents/Resources`. Copy `GameData` folder somewhere, for example `/Applications/Fallout`.
-
-- Or if you're a Terminal user and have Homebrew installed you can extract the needed files from the GoG installer:
-
-```console
-$ brew install innoextract
-$ innoextract ~/Downloads/setup_fallout_2.1.0.18.exe -I app
-$ mv app /Applications/Fallout
-```
-
-- Download and copy `fallout-ce.app` to this folder.
-
-- Run `fallout-ce.app`.
-
-### Android
-
-> **NOTE**: Fallout was designed with mouse in mind. There are many controls that require precise cursor positioning, which is not possible with fingers. Current control scheme resembles trackpad usage:
-> - One finger moves mouse cursor around.
-> - Tap one finger for left mouse click.
-> - Tap two fingers for right mouse click (switches mouse cursor mode).
-> - Move two fingers to scroll current view (map view, worldmap view, inventory scrollers).
-
-> **NOTE**: From Android standpoint release and debug builds are different apps. Both apps require their own copy of game assets and have their own savegames. This is intentional. As a gamer just stick with release version and check for updates.
-
-- Use Windows installation as a base - it contains data assets needed to play. Copy `Fallout` folder to your device, for example to `Downloads`. You need `master.dat`, `critter.dat`, and `data` folder. Watch for file names - keep (or make) them lowercased (see [Configuration](#configuration)).
-
-- Download `fallout-ce.apk` and copy it to your device. Open it with file explorer, follow instructions (install from unknown source).
-
-- When you run the game for the first time it will immediately present file picker. Select the folder from the first step. Wait until this data is copied. A loading dialog will appear, just wait for about 30 seconds. The game will start automatically.
-
-### iOS
-
-> **NOTE**: See Android note on controls.
-
-- Download `fallout-ce.ipa`. Use sideloading applications ([AltStore](https://altstore.io/) or [Sideloadly](https://sideloadly.io/)) to install it to your device. Alternatively you can always build from source with your own signing certificate.
-
-- Run the game once. You'll see error message saying "Could not find the master datafile...". This step is needed for iOS to expose the game via File Sharing feature.
-
-- Use Finder (macOS Catalina and later) or iTunes (Windows and macOS Mojave or earlier) to copy `master.dat`, `critter.dat`, and `data` folder to "Fallout" app ([how-to](https://support.apple.com/HT210598)). Watch for file names - keep (or make) them lowercased (see [Configuration](#configuration)).
-
-## Configuration
-
-The main configuration file is `fallout.cfg`. There are several important settings you might need to adjust for your installation. Depending on your Fallout distribution main game assets `master.dat`, `critter.dat`, and `data` folder might be either all lowercased, or all uppercased. You can either update `master_dat`, `critter_dat`, `master_patches` and `critter_patches` settings to match your file names, or rename files to match entries in your `fallout.cfg`.
-
-The `sound` folder (with `music` folder inside) might be located either in `data` folder, or be in the Fallout folder. Update `music_path1` setting to match your hierarchy, usually it's `data/sound/music/` or `sound/music/`. Make sure it match your path exactly (so it might be `SOUND/MUSIC/` if you've installed Fallout from CD). Music files themselves (with `ACM` extension) should be all uppercased, regardless of `sound` and `music` folders.
-
-The second configuration file is `f1_res.ini`. Use it to change game window size and enable/disable fullscreen mode.
-
-```ini
-[MAIN]
-SCR_WIDTH=1280
-SCR_HEIGHT=720
-WINDOWED=1
-```
-
-Recommendations:
-- **Desktops**: Use any size you see fit.
-- **Tablets**: Set these values to logical resolution of your device, for example iPad Pro 11 is 1668x2388 (pixels), but it's logical resolution is 834x1194 (points).
-- **Mobile phones**: Set height to 480, calculate width according to your device screen (aspect) ratio, for example Samsung S21 is 20:9 device, so the width should be 480 * 20 / 9 = 1067.
-
-In time this stuff will receive in-game interface, right now you have to do it manually.
-
-## Contributing
-
-Here is a couple of current goals. Open up an issue if you have suggestion or feature request.
-
-- **Update to v1.2**. This project is based on Reference Edition which implements v1.1 released in November 1997. There is a newer v1.2 released in March 1998 which at least contains important multilingual support.
-
-- **Backport some Fallout 2 features**. Fallout 2 (with some Sfall additions) added many great improvements and quality of life enhancements to the original Fallout engine. Many deserve to be backported to Fallout 1. Keep in mind this is a different game, with slightly different gameplay balance (which is a fragile thing on its own).
+Put mods in `mods/` next to the game data (loose files or `.dat` files).
+Mods override `master.dat`/`critter.dat` content. A boot menu lets you
+enable/disable detected mods with the controller before the game starts.
 
 ## License
 
-The source code is this repository is available under the [Sustainable Use License](LICENSE.md).
+The engine code is distributed under the [Sustainable Use
+License](LICENSE.md) v1.0 (non-commercial use; keep all notices). The
+PlayStation 2 platform layer added by this port is licensed under the same
+terms.
+
+---
+
+# Español
+
+Un **port nativo para PlayStation 2** del motor de Fallout 1, basado en
+[**fallout1-ce**](https://github.com/alexbatalov/fallout1-ce) de
+[Alexander Batalov (`alexbatalov`)](https://github.com/alexbatalov) y sus
+colaboradores. El motor se compila para el Emotion Engine (MIPS R5900) con
+**PS2SDK** (gsKit, libpad, audsrv, fileXio, libmc) y funciona en consola real
+(FMCB/OPL) y en PCSX2.
+
+Está previsto un segundo objetivo: el port de Fallout 2 CE reutilizando la
+misma capa de plataforma.
+
+> **Aviso:** Proyecto fan no oficial y sin ánimo de lucro. No está afiliado ni
+> respaldado por Bethesda Softworks, Interplay ni los creadores del Fallout
+> original. "Fallout" es una marca registrada de sus respectivos dueños.
+
+## ⚠️ Aviso de obra modificada
+
+Este repositorio contiene una **versión modificada** de
+[fallout1-ce](https://github.com/alexbatalov/fallout1-ce) (Sustainable Use
+License v1.0). Modificaciones realizadas: capa de plataforma nativa PS2
+(`src/platform/ps2/`, C99) para vídeo (gsKit, framebuffer indexado 8 bits
+`GS_PSM_T8` + paleta `GS_PSM_CT32`), entrada (libpad), audio (audsrv),
+ficheros (fileXio), guardado en Memory Card (`icon.sys` generado), allocator
+por arena y cargador de mods con menú de arranque; sustitución del backend
+SDL2 por implementaciones PS2 de las interfaces existentes del motor; y
+cambios de build para el toolchain ps2dev. El texto de licencia original se
+mantiene intacto en [LICENSE.md](LICENSE.md).
+
+## Créditos
+
+Gracias infinitas a:
+
+- **[Alexander Batalov (`alexbatalov`)]** — autor de
+  [fallout1-ce](https://github.com/alexbatalov/fallout1-ce) y
+  [fallout2-ce](https://github.com/alexbatalov/fallout2-ce), la
+  reimplementación limpia del motor sobre la que se construye este port. Todo
+  el trabajo de ingeniería del motor, bugfixes y la base de
+  ingeniería inversa es suyo y de sus colaboradores.
+- **Colaboradores de fallout1-ce / fallout2-ce** — ver repos upstream.
+- **Comunidad ps2dev / PS2SDK / gsKit** — por el toolchain, drivers y
+  librerías que hacen posible el homebrew de PS2.
+
+## Legal / sin assets del juego
+
+Este repositorio contiene **solo código fuente**. **No** contiene material con
+copyright: ni `MASTER.DAT`, ni `CRITTER.DAT`, ni gráficos, sonido, música,
+vídeos, textos o datos de Fallout. Debes poseer una copia legal de Fallout
+para usar este software (ver [Cómo usar tus propios datos legales]).
+
+## Bring Your Own Game (usa tus propios datos)
+
+Necesitas los ficheros de datos originales. **Formas legales de obtenerlos:**
+
+### Desde Steam
+
+1. Instala Fallout (1997) desde Steam (App ID 38400).
+2. Clic derecho en el juego → **Gestionar → Explorar archivos locales**.
+3. Copia de la carpeta del juego:
+   - `MASTER.DAT`
+   - `CRITTER.DAT`
+   - la carpeta `data` (contiene `sound/`, `music/`, etc.)
+
+### Desde GOG
+
+1. Instala Fallout con GOG Galaxy o extrae el instalador offline:
+
+   ```console
+   $ sudo apt install innoextract
+   $ innoextract setup_fallout_2.1.0.18.exe -I app
+   ```
+
+2. Usa el contenido de la carpeta `app` extraída. Mismos ficheros.
+
+### Dónde colocar los ficheros
+
+**Consola real (USB / MX4SIO / HDD):**
+
+```
+mass:/FALLOUT/MASTER.DAT
+mass:/FALLOUT/CRITTER.DAT
+mass:/FALLOUT/data/...
+mass:/FALLOUT/mods/...        (opcional)
+mass:/FALLOUT/saves/...       (guardado alternativo)
+```
+
+El pendrive debe estar en FAT32. MX4SIO expone la SD como `mass:` también.
+
+**PCSX2 (recomendado para desarrollo/pruebas rápidas):**
+
+- Coloca el mismo contenido en la carpeta `local_assets/` del repositorio
+  (ignorada por git).
+- En PCSX2: **Settings → Emulation → Enable Host Filesystem**.
+- Arranca `fallout1-ce.elf` desde la raíz del repositorio con
+  **System → Boot ELF**; el dispositivo `host:` apunta entonces a la carpeta
+  del repositorio y el juego lee `host:local_assets/`.
+
+## Compilación
+
+La compilación cruzada usa el toolchain oficial de ps2dev en Docker (sin
+instalar nada en el sistema anfitrión). La imagen upstream `ps2dev/ps2dev`
+solo trae el toolchain pelado, así que este repositorio incluye una imagen
+derivada mínima que añade `cmake`, `make` y `ninja`, más un toolchain file
+propio modernizado:
+
+```console
+docker build -t fallout-ce-ps2-build os/ps2/build
+docker run --rm -v "$(pwd):/src" -w /src fallout-ce-ps2-build sh -c \
+  "cmake -B build_ps2 -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-ps2.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build build_ps2 -j\$(nproc)"
+```
+
+El resultado es `fallout1-ce.elf` en la raíz del repositorio. Cópialo a
+`mass:/FALLOUT/` (consola) o arráncalo con PCSX2 (emulador).
+
+## Controles (DualShock 2)
+
+| Entrada | Acción |
+| --- | --- |
+| Stick izquierdo | Cursor del ratón (con curva de aceleración) |
+| Stick derecho | Scroll de mapa / mapa del mundo |
+| ✕ | Clic izquierdo |
+| ○ | Clic derecho / cambiar modo de cursor |
+| L1 | Cambiar arma activa |
+| R1 | Pip-Boy |
+| L2 | Inventario |
+| R2 | Fin de turno |
+| D-Pad | Scroll de vista |
+| START | Menú del juego (Esc) |
+| SELECT | Hoja de personaje (C) |
+
+## Guardado
+
+Los guardados usan carpetas planas en la Memory Card, una por ranura (el
+navegador de PS2 no soporta carpetas anidadas):
+
+```
+mc0:/FALLOUT1_S01/ … FALLOUT1_S10/   cada una con SAVE.DAT, icon.sys, icon.icn
+```
+
+Si no hay Memory Card (o está llena), se guarda en `mass:/FALLOUT/saves/` y,
+en PCSX2, en `host:local_assets/saves/`.
+
+## Mods
+
+Coloca los mods en `mods/` junto a los datos del juego (archivos sueltos o
+`.dat`). Los mods tienen prioridad sobre `master.dat`/`critter.dat`. Un menú
+de arranque permite activar/desactivar los mods detectados con el mando antes
+de iniciar la partida.
+
+## Licencia
+
+El código del motor se distribuye bajo la [Sustainable Use
+License](LICENSE.md) v1.0 (uso no comercial; conservar todos los avisos). La
+capa de plataforma PS2 añadida por este port se licencia bajo los mismos
+términos.
