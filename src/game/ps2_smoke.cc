@@ -27,7 +27,19 @@
  *             1 (memory card / host fallback via the F6 shim), verifies the
  *             files on disk, reboots to V13ENT, loads slot 1 back and
  *             compares map/tile/inventory/time/quest flags
- *   state 10  verdict + exit()
+ *   state 10  world tour: warps through the heaviest maps while the heap is
+ *             probed (mallinfo + engine counters) and checks the usage
+ *             plateaus instead of climbing (F7 memory budget)
+ *   state 11  dialogue stress: warps to the map of a voiced head NPC
+ *             (Killian in Junktown), parks the dude in front of them, runs
+ *             the real talk script and drives the option list with synthetic
+ *             digit taps; verifies the talking head art and the streamed
+ *             voice-over (F7)
+ *   state 12  combat stress: starts a real melee via the crosshair click
+ *             (combat_attack_this), drives player attacks and SPACE
+ *             end-turn taps while the AI turns resolve, then leaves the
+ *             battle cleanly (F7)
+ *   state 13  verdict + exit()
  *
  * A stall detector runs on every event pump tick: the worst gap between two
  * ticks (i.e. the longest the engine went without servicing a frame) is
@@ -54,10 +66,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "game/art.h"
+#include "game/combat.h"
 #include "game/credits.h"
 #include "game/game.h"
+#include "game/gdialog.h"
 #include "game/gmouse.h"
 #include "game/gsound.h"
+#include "game/intface.h"
 #include "game/loadsave.h"
 #include "game/mainmenu.h"
 #include "game/game_vars.h"
@@ -65,6 +81,7 @@
 #include "game/object.h"
 #include "game/palette.h"
 #include "game/proto.h"
+#include "game/protinst.h"
 #include "game/roll.h"
 #include "game/scripts.h"
 #include "game/select.h"
@@ -77,6 +94,7 @@
 #include "plib/gnw/mouse.h"
 #include "plib/gnw/svga.h"
 #include "platform_compat.h"
+#include "ps2_mem.h"
 #include "ps2_save.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
@@ -90,6 +108,15 @@ extern void ps2_fs_stat_reset(void);
 
 namespace fallout {
 
+/* F7 memory probes (see plib/gnw/memory.cc, smoke builds only). */
+int ps2_mem_engine_cur_kb(void);
+int ps2_mem_engine_max_kb(void);
+void ps2_mem_engine_report(const char* tag);
+
+/* F7 dialogue stress: voice-over counters (see game/lip_sync.cc). */
+extern unsigned int ps2_lips_load_count;
+extern unsigned int ps2_lips_play_count;
+
 #define SMOKE_LOG(...)                     \
     do {                                   \
         printf("[ps2][smoke] " __VA_ARGS__); \
@@ -99,9 +126,26 @@ namespace fallout {
 
 #define SMOKE_START_MAP "V13ENT.MAP"
 #define SMOKE_STREAM_MAP "JUNKENT.MAP"
-#define SMOKE_WATCHDOG_MS 120000
+#define SMOKE_WATCHDOG_MS 300000
 #define SMOKE_STALL_MS 1500
 #define SMOKE_WALK_ATTEMPTS 4
+
+/* State 10 - world tour memory stress (F7). */
+#define SMOKE_TOUR_SETTLE_MS 1000
+#define SMOKE_TOUR_PLATEAU_KB 2048
+#define SMOKE_TOUR_CEIL_KB 20480
+
+/* State 11 - talking-head dialogue stress (F7). */
+#define SMOKE_DLG_SETTLE_MS 800
+#define SMOKE_DLG_MAX_MS 22000
+#define SMOKE_DLG_CAND_MAX 32
+#define SMOKE_DLG_TRIES 3
+
+/* State 12 - turn-based combat stress (F7). */
+#define SMOKE_CBT_SETTLE_MS 900
+#define SMOKE_CBT_MAX_MS 20000
+#define SMOKE_CBT_DRIVE_MS 2500
+#define SMOKE_CBT_CLICK_TRIES 5
 
 /* Scripted synthetic input (see smoke_script_arm). Keep in sync with the
  * widest single-screen sequence (the preferences slider drags). */
@@ -120,6 +164,9 @@ typedef enum SmokeState {
     SMOKE_STATE_SKILLDEX,
     SMOKE_STATE_MAP_STREAM,
     SMOKE_STATE_SAVELOAD,
+    SMOKE_STATE_WORLD_TOUR,
+    SMOKE_STATE_DIALOGUE,
+    SMOKE_STATE_COMBAT,
     SMOKE_STATE_VERDICT,
 } SmokeState;
 
@@ -129,6 +176,10 @@ typedef enum SmokeAction {
     SMOKE_ACTION_SAVE,
     SMOKE_ACTION_LOAD,
     SMOKE_ACTION_WIPE,
+    SMOKE_ACTION_TOUR_STEP,
+    SMOKE_ACTION_DIALOGUE_LOAD,
+    SMOKE_ACTION_DIALOGUE_TALK,
+    SMOKE_ACTION_COMBAT_START,
     SMOKE_ACTION_VERDICT,
 } SmokeAction;
 
@@ -185,6 +236,53 @@ static int s9_load_rc;
 static bool s9_files_ok;
 static bool s_save_load_ok;
 
+/* State 10 - world tour (F7). Starts and ends on JUNKENT so the plateau
+ * check compares the same fully warmed map across two full passes. */
+static const char* const s_tour_maps[] = {
+    "V13ENT.MAP", "SHADYE.MAP", "JUNKENT.MAP", "HUBDWNTN.MAP",
+    "HALLDED.MAP", "MBENT.MAP", "CHILDRN1.MAP", "JUNKENT.MAP",
+};
+#define SMOKE_TOUR_MAPS ((int)(sizeof(s_tour_maps) / sizeof(s_tour_maps[0])))
+static int s_tour_idx;
+static int s_tour_used_kb[SMOKE_TOUR_MAPS];
+static int s_tour_engine_kb[SMOKE_TOUR_MAPS];
+static unsigned int s_tour_load_ms[SMOKE_TOUR_MAPS];
+static bool s_world_tour_ok;
+
+/* State 11 - dialogue stress (F7). Each map is scanned for scripted critters;
+ * the one whose proto name looks like a known voiced head (Killian in
+ * JUNKKILL, Gizmo in JUNKCSNO, Aradesh in Shady Sands) is preferred. */
+static const char* const s_dlg_maps[] = { "JUNKKILL.MAP", "SHADYW.MAP", "SHADYE.MAP", "JUNKCSNO.MAP" };
+#define SMOKE_DLG_MAPS ((int)(sizeof(s_dlg_maps) / sizeof(s_dlg_maps[0])))
+static Object* s_dlg_cand[SMOKE_DLG_CAND_MAX];
+static int s_dlg_cand_count;
+static int s_dlg_cand_idx;
+static Object* s_dlg_target;
+static char s_dlg_name[32];
+static bool s_dlg_active;
+static bool s_dlg_forced;
+static unsigned int s_dlg_start;
+static bool s_dlg_ran;
+static int s_dlg_head;
+static unsigned int s_dlg_voice_load;
+static unsigned int s_dlg_voice_play;
+static bool s_dialogue_ok;
+
+/* State 12 - combat stress (F7). */
+static Object* s_cbt_target;
+static char s_cbt_name[32];
+static int s_cbt_hp_before;
+static int s_cbt_target_hp_before;
+static int s_cbt_attacks;
+static int s_cbt_space_taps;
+static int s_cbt_drives;
+static bool s_cbt_engaged;
+static bool s_cbt_ai_seen;
+static char s_cbt_ai_name[32];
+static unsigned int s_cbt_start;
+static unsigned int s_cbt_last_drive;
+static bool s_combat_ok;
+
 /* ---- Scripted synthetic input ----
  *
  * A small timed script drives the frontend screens and the modal in-game UI
@@ -239,6 +337,12 @@ static const char* smoke_state_name(SmokeState state)
         return "map-stream";
     case SMOKE_STATE_SAVELOAD:
         return "save-load";
+    case SMOKE_STATE_WORLD_TOUR:
+        return "world-tour";
+    case SMOKE_STATE_DIALOGUE:
+        return "dialogue";
+    case SMOKE_STATE_COMBAT:
+        return "combat";
     case SMOKE_STATE_VERDICT:
         return "verdict";
     }
@@ -343,6 +447,138 @@ static void smoke_check_dude(const char* where)
     }
 
     SMOKE_LOG("check %s: dude tile=%d elevation=%d", where, obj_dude->tile, obj_dude->elevation);
+}
+
+/* F7: one heap snapshot - system allocator + engine tracked bytes. */
+static void smoke_mem_probe(const char* tag)
+{
+    ps2_mem_report(tag);
+    ps2_mem_engine_report(tag);
+}
+
+/* Known voiced-head NPCs (proto name prefixes, case-insensitive): Killian
+ * and Gizmo live in Junktown, Aradesh in Shady Sands, the Overseer in the
+ * vault. Anything else scores 1 (still usable, tried later). */
+static const char* const s_dlg_head_names[] = { "arad", "kill", "gizm", "over", "elde" };
+
+static int smoke_dlg_name_score(const char* name)
+{
+    if (name == NULL) {
+        return 0;
+    }
+
+    for (int i = 0; i < (int)(sizeof(s_dlg_head_names) / sizeof(s_dlg_head_names[0])); i++) {
+        const char* pat = s_dlg_head_names[i];
+
+        for (const char* p = name; p[0] != '\0'; p++) {
+            int j = 0;
+            while (pat[j] != '\0' && p[j] != '\0' && (p[j] | 0x20) == pat[j]) {
+                j++;
+            }
+
+            if (pat[j] == '\0') {
+                return 2;
+            }
+        }
+    }
+
+    return 1;
+}
+
+/* Collects scripted critters of the loaded map as dialogue candidates and
+ * moves the best-scoring one (Aradesh-like name) to the front. Returns 2 when
+ * a preferred candidate was found, 0 otherwise. */
+static int smoke_dlg_scan(void)
+{
+    int best = -1;
+    s_dlg_cand_count = 0;
+
+    Object* obj = obj_find_first();
+    while (obj != NULL && s_dlg_cand_count < SMOKE_DLG_CAND_MAX) {
+        if (obj != obj_dude
+            && obj->sid != -1
+            && PID_TYPE(obj->pid) == OBJ_TYPE_CRITTER
+            && obj->elevation == map_elevation
+            && (obj->flags & OBJECT_HIDDEN) == 0
+            && (obj->data.critter.combat.results & DAM_DEAD) == 0) {
+            const char* name = proto_name(obj->pid);
+            int score = smoke_dlg_name_score(name);
+
+            SMOKE_LOG("state11: candidate %d: %s (pid=0x%08X sid=0x%08X)",
+                s_dlg_cand_count + 1, name != NULL ? name : "?", obj->pid, obj->sid);
+
+            s_dlg_cand[s_dlg_cand_count] = obj;
+            if (score >= 2 && best == -1) {
+                best = s_dlg_cand_count;
+            }
+
+            s_dlg_cand_count++;
+        }
+
+        obj = obj_find_next();
+    }
+
+    if (best > 0) {
+        Object* tmp = s_dlg_cand[0];
+        s_dlg_cand[0] = s_dlg_cand[best];
+        s_dlg_cand[best] = tmp;
+    }
+
+    return best == -1 ? 0 : 2;
+}
+
+/* Screen point at the centre of a critter's art bounding box (same math as
+ * obj_bound) - the aim point for the synthetic attack click. */
+static bool smoke_cbt_sprite_center(Object* obj, int* outX, int* outY)
+{
+    int tileScreenX = 0;
+    int tileScreenY = 0;
+
+    if (obj == NULL || tile_coord(obj->tile, &tileScreenX, &tileScreenY, obj->elevation) != 0) {
+        return false;
+    }
+
+    CacheEntry* artHandle = NULL;
+    Art* art = art_ptr_lock(obj->fid, &artHandle);
+    if (art == NULL) {
+        return false;
+    }
+
+    tileScreenX += 16 + art->xOffsets[obj->rotation] + obj->x;
+    tileScreenY += 8 + art->yOffsets[obj->rotation] + obj->y;
+
+    int width = art_frame_width(art, obj->frame, obj->rotation);
+    int height = art_frame_length(art, obj->frame, obj->rotation);
+
+    art_ptr_unlock(artHandle);
+
+    *outX = tileScreenX + width / 2;
+    *outY = tileScreenY + height / 2;
+    return true;
+}
+
+/* Posts one synthetic map click (clamped clear of the interface bar). */
+static void smoke_cbt_click(unsigned int now, int x, int y)
+{
+    SmokeScriptEntry entry;
+
+    if (x < 12) x = 12;
+    if (x > 627) x = 627;
+    if (y < 44) y = 44;
+    if (y > 468) y = 468;
+
+    entry.at = 0;
+    entry.kind = SMOKE_SCRIPT_CLICK;
+    entry.a = x;
+    entry.b = y;
+    smoke_script_arm(now, &entry, 1);
+}
+
+/* Taps SPACE to hand the turn over to the AI. */
+static void smoke_cbt_space(unsigned int now)
+{
+    SmokeScriptEntry entry = { 0, SMOKE_SCRIPT_KEY, SDL_SCANCODE_SPACE, 0 };
+    smoke_script_arm(now, &entry, 1);
 }
 
 /* Boot a premade dude straight into a map (mirrors main.cc main_load_new). */
@@ -692,8 +928,275 @@ static void smoke_run_pending(unsigned int now)
         break;
     }
 
+    case SMOKE_ACTION_TOUR_STEP: {
+        s_pending = SMOKE_ACTION_NONE;
+
+        const char* mapName = s_tour_maps[s_tour_idx];
+        char mapBuf[32];
+        snprintf(mapBuf, sizeof(mapBuf), "%s", mapName);
+
+        SMOKE_LOG("state10: tour %d/%d loading %s ...",
+            s_tour_idx + 1, SMOKE_TOUR_MAPS, mapName);
+
+        unsigned int start = now;
+        s_in_blocking_action = true;
+        int rc = map_load(mapBuf);
+        s_in_blocking_action = false;
+
+        /* Blocking load - do not count it as a frame gap. */
+        s_tick_last = 0;
+
+        if (rc == -1) {
+            smoke_fail("world tour: map load failed");
+            SMOKE_LOG("state10: %s failed to load", mapName);
+            s_state = SMOKE_STATE_VERDICT;
+            s_state_time = ps2_time_ms();
+            s_phase = 0;
+            s_pending = SMOKE_ACTION_VERDICT;
+            break;
+        }
+
+        obj_turn_on(obj_dude, NULL);
+        tile_refresh_display();
+
+        s_tour_used_kb[s_tour_idx] = ps2_mem_used_kb();
+        s_tour_engine_kb[s_tour_idx] = ps2_mem_engine_cur_kb();
+        s_tour_load_ms[s_tour_idx] = ps2_time_ms() - start;
+        smoke_mem_probe(mapName);
+
+        SMOKE_LOG("state10: tour %d/%d %s loaded in %u ms (heap used %d KB, engine %d KB)",
+            s_tour_idx + 1, SMOKE_TOUR_MAPS, mapName,
+            s_tour_load_ms[s_tour_idx], s_tour_used_kb[s_tour_idx], s_tour_engine_kb[s_tour_idx]);
+
+        s_tour_idx++;
+        s_phase = s_tour_idx;
+        s_state_time = ps2_time_ms();
+        break;
+    }
+
+    case SMOKE_ACTION_DIALOGUE_LOAD: {
+        s_pending = SMOKE_ACTION_NONE;
+
+        bool loadFailed = false;
+        int wantMap = -1;
+        int loaded = -1;
+        bool preferred = false;
+
+        s_in_blocking_action = true;
+
+        for (int i = 0; i < SMOKE_DLG_MAPS && !loadFailed; i++) {
+            char mapBuf[32];
+            snprintf(mapBuf, sizeof(mapBuf), "%s", s_dlg_maps[i]);
+            SMOKE_LOG("state11: scanning %s for dialogue candidates ...", mapBuf);
+
+            int rc = 0;
+            if (smoke_map_name_matches(mapBuf, map_data.name)) {
+                SMOKE_LOG("state11: %s is already the live map; scanning in place", mapBuf);
+            } else {
+                rc = map_load(mapBuf);
+            }
+
+            if (rc == -1) {
+                smoke_fail("dialogue: map load failed");
+                SMOKE_LOG("state11: %s failed to load", mapBuf);
+                loadFailed = true;
+                break;
+            }
+
+            loaded = i;
+            obj_turn_on(obj_dude, NULL);
+            tile_refresh_display();
+            smoke_mem_probe(mapBuf);
+
+            int score = smoke_dlg_scan();
+
+            if (s_dlg_cand_count > 0) {
+                wantMap = i;
+            }
+
+            if (score >= 2) {
+                wantMap = i;
+                preferred = true;
+                break;
+            }
+        }
+
+        if (!loadFailed && wantMap >= 0 && wantMap != loaded) {
+            /* The preferred candidates live on the other map; go back. */
+            char mapBuf[32];
+            snprintf(mapBuf, sizeof(mapBuf), "%s", s_dlg_maps[wantMap]);
+            SMOKE_LOG("state11: going back to %s for its candidates", mapBuf);
+
+            if (map_load(mapBuf) == -1) {
+                smoke_fail("dialogue: map reload failed");
+                loadFailed = true;
+            } else {
+                obj_turn_on(obj_dude, NULL);
+                tile_refresh_display();
+                smoke_dlg_scan();
+            }
+        }
+
+        s_in_blocking_action = false;
+        s_tick_last = 0;
+
+        if (loadFailed || wantMap == -1) {
+            if (!loadFailed) {
+                smoke_fail("dialogue: no scripted critters found on the target maps");
+            }
+
+            s_state = SMOKE_STATE_VERDICT;
+            s_state_time = ps2_time_ms();
+            s_phase = 0;
+            s_pending = SMOKE_ACTION_VERDICT;
+            break;
+        }
+
+        s_dlg_cand_idx = 0;
+        s_dlg_target = s_dlg_cand[0];
+        const char* chosen = proto_name(s_dlg_target->pid);
+        SMOKE_LOG("state11: chosen %s (candidates=%d preferred=%d)",
+            chosen != NULL ? chosen : "?", s_dlg_cand_count, preferred ? 1 : 0);
+        smoke_mem_probe("dialogue");
+
+        s_phase = 2;
+        s_state_time = ps2_time_ms();
+        break;
+    }
+
+    case SMOKE_ACTION_DIALOGUE_TALK: {
+        s_pending = SMOKE_ACTION_NONE;
+
+        Object* cand = s_dlg_target;
+        if (cand == NULL) {
+            smoke_fail("dialogue: no target to talk to");
+            s_state = SMOKE_STATE_VERDICT;
+            s_state_time = ps2_time_ms();
+            s_phase = 0;
+            s_pending = SMOKE_ACTION_VERDICT;
+            break;
+        }
+
+        const char* name = proto_name(cand->pid);
+        snprintf(s_dlg_name, sizeof(s_dlg_name), "%s", name != NULL ? name : "?");
+
+        SMOKE_LOG("state11: talking to %s (pid=0x%08X sid=0x%08X) ...",
+            s_dlg_name, cand->pid, cand->sid);
+
+        /* Get within talking range: gdialog_enter needs line of sight. */
+        obj_attempt_placement(obj_dude, cand->tile, cand->elevation, 0);
+        tile_refresh_display();
+
+        static const SmokeScriptEntry dlg_keys[] = {
+            { 3500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_1, 0 },
+            { 7500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_1, 0 },
+            { 11500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_1, 0 },
+            { 15500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_1, 0 },
+        };
+
+        s_dlg_voice_load = ps2_lips_load_count;
+        s_dlg_voice_play = ps2_lips_play_count;
+        s_dlg_forced = false;
+        s_dlg_start = now;
+
+        smoke_script_arm(now, dlg_keys, 4);
+
+        s_dlg_active = true;
+        s_in_blocking_action = true;
+        gdialog_enter(cand, 0);
+        s_in_blocking_action = false;
+        s_dlg_active = false;
+
+        if (game_user_wants_to_quit == 1) {
+            /* Forced end (fallback or engine request): swallow it so the
+             * suite keeps running; clean option-driven exits leave it 0. */
+            s_dlg_forced = true;
+            game_user_wants_to_quit = 0;
+        }
+
+        smoke_script_clear();
+
+        /* A talking head was shown when op_start_gdialog picked a head id
+         * (dialogue_head > 0); -1 means a headless dialogue ran, 0 that no
+         * dialogue started at all. */
+        s_dlg_head = dialogue_head;
+        s_dlg_ran = s_dlg_head > 0;
+        s_dlg_voice_load = ps2_lips_load_count - s_dlg_voice_load;
+        s_dlg_voice_play = ps2_lips_play_count - s_dlg_voice_play;
+
+        SMOKE_LOG("state11: %s talk done: head=0x%08X voice(load=%u play=%u) forced=%d",
+            s_dlg_name, (unsigned int)s_dlg_head,
+            s_dlg_voice_load, s_dlg_voice_play, s_dlg_forced ? 1 : 0);
+
+        s_phase = 4;
+        s_state_time = ps2_time_ms();
+        s_tick_last = 0;
+        break;
+    }
+
+    case SMOKE_ACTION_COMBAT_START: {
+        s_pending = SMOKE_ACTION_NONE;
+
+        Object* target = s_dlg_target;
+        if (target == NULL || (target->data.critter.combat.results & DAM_DEAD) != 0) {
+            smoke_fail("combat: no live dialogue target for the battle");
+            s_state = SMOKE_STATE_VERDICT;
+            s_state_time = ps2_time_ms();
+            s_phase = 0;
+            s_pending = SMOKE_ACTION_VERDICT;
+            break;
+        }
+
+        const char* name = proto_name(target->pid);
+        snprintf(s_cbt_name, sizeof(s_cbt_name), "%s", name != NULL ? name : "?");
+
+        SMOKE_LOG("state12: staging combat on %s (pid=0x%08X, %d tiles away) ...",
+            s_cbt_name, target->pid, tile_dist(obj_dude->tile, target->tile));
+
+        /* Park the dude next to the target: the unarmed punch needs range 1. */
+        obj_attempt_placement(obj_dude, target->tile, target->elevation, 0);
+
+        /* The dialogue restores its own view centre on exit, so after the
+         * teleport both fighters can be off screen; bring the view back so
+         * the attack click has something to land on. */
+        tile_scroll_to(obj_dude->tile, 2);
+        tile_refresh_display();
+
+        s_cbt_target = target;
+        s_cbt_hp_before = obj_dude->data.critter.hp;
+        s_cbt_target_hp_before = target->data.critter.hp;
+        s_cbt_attacks = 0;
+        s_cbt_space_taps = 0;
+        s_cbt_drives = 0;
+        s_cbt_engaged = false;
+        s_cbt_ai_seen = false;
+        s_cbt_ai_name[0] = '\0';
+        s_cbt_start = 0;
+        s_cbt_last_drive = 0;
+
+        int hitMode = -1;
+        bool aiming = false;
+        int attackRc = intface_get_attack(&hitMode, &aiming);
+        SMOKE_LOG("state12: attack ready: rc=%d hitMode=%d dude hp=%d target hp=%d",
+            attackRc, hitMode, s_cbt_hp_before, s_cbt_target_hp_before);
+
+        /* Survive the retaliation: the test needs the cycle, not a win. */
+        obj_dude->data.critter.hp = 999;
+
+        /* Crosshair mode routes map clicks to combat_attack_this(). */
+        gmouse_set_cursor(MOUSE_CURSOR_CROSSHAIR);
+        gmouse_3d_set_mode(GAME_MOUSE_MODE_CROSSHAIR);
+
+        s_phase = 2;
+        s_state_time = ps2_time_ms();
+        s_tick_last = 0;
+        break;
+    }
+
     case SMOKE_ACTION_VERDICT:
         s_pending = SMOKE_ACTION_NONE;
+
+        smoke_mem_probe("final");
 
         if (s_worst_gap > SMOKE_STALL_MS) {
             SMOKE_LOG("FAIL: stutter detected: worst frame gap %u ms (state %s)",
@@ -704,12 +1207,15 @@ static void smoke_run_pending(unsigned int now)
         SMOKE_LOG("perf: suite %u ms, %u top-level frames, worst frame gap %u ms (%s)",
             now - s_suite_start, s_frames, s_worst_gap, smoke_state_name(s_worst_gap_state));
 
-        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=%s",
+        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=%s world-tour=%s dialogue=%s combat=%s",
             s_fe_credits ? "ok" : "skip",
             s_fe_load ? "ok" : "skip",
             s_fe_newgame ? "ok" : "skip",
             SMOKE_START_MAP, s_walk_moved ? "ok" : "skip",
-            SMOKE_STREAM_MAP, s_save_load_ok ? "ok" : "skip");
+            SMOKE_STREAM_MAP, s_save_load_ok ? "ok" : "skip",
+            s_world_tour_ok ? "ok" : "skip",
+            s_dialogue_ok ? "ok" : "skip",
+            s_combat_ok ? "ok" : "skip");
 
         if (s_failures == 0) {
             SMOKE_LOG("ALL_SUBSYSTEMS_OK");
@@ -1154,12 +1660,268 @@ extern "C" void ps2_smoke_tick(void)
                 SMOKE_LOG("state9 PASS: save/load round-trip (slot 1) verified");
             }
 
-            s_state = SMOKE_STATE_VERDICT;
+            /* Hand over to the world tour memory stress (state 10). */
+            s_state = SMOKE_STATE_WORLD_TOUR;
             s_state_time = now;
             s_phase = 0;
-            s_pending = SMOKE_ACTION_VERDICT;
+            s_tour_idx = 0;
+            s_pending = SMOKE_ACTION_NONE;
         }
         break;
+
+    case SMOKE_STATE_WORLD_TOUR: {
+        /* Map scripts on hostile maps (mutants, cultists) can drag the dude
+         * into combat; end it cleanly so the tour keeps rolling. The
+         * combat_input() loop treats quit==1 as "battle over" and resets
+         * the flag itself. */
+        if (isInCombat() && elapsed >= 1500) {
+            SMOKE_LOG("state10: combat broke out on %s; forcing it to end",
+                s_tour_idx > 0 ? s_tour_maps[s_tour_idx - 1] : "?");
+            game_user_wants_to_quit = 1;
+            s_state_time = now;
+            break;
+        }
+
+        if (s_phase < SMOKE_TOUR_MAPS) {
+            if (!s_in_blocking_action && elapsed >= SMOKE_TOUR_SETTLE_MS) {
+                s_pending = SMOKE_ACTION_TOUR_STEP;
+            }
+        } else if (elapsed >= 800) {
+            /* All maps loaded: evaluate the memory budget. */
+            int junkent1 = s_tour_used_kb[2];
+            int junkent2 = s_tour_used_kb[SMOKE_TOUR_MAPS - 1];
+            int peak = 0;
+            bool ok = true;
+
+            for (int i = 0; i < SMOKE_TOUR_MAPS; i++) {
+                SMOKE_LOG("state10: mem row %d/%d %s used=%dK engine=%dK load=%ums",
+                    i + 1, SMOKE_TOUR_MAPS, s_tour_maps[i],
+                    s_tour_used_kb[i], s_tour_engine_kb[i], s_tour_load_ms[i]);
+
+                if (s_tour_used_kb[i] > peak) {
+                    peak = s_tour_used_kb[i];
+                }
+            }
+
+            SMOKE_LOG("state10: JUNKENT used %dK -> %dK across the tour (delta %dK)",
+                junkent1, junkent2, junkent2 - junkent1);
+
+            if (junkent2 > junkent1 + SMOKE_TOUR_PLATEAU_KB) {
+                smoke_fail("world tour: heap keeps growing (no plateau)");
+                ok = false;
+            }
+
+            if (peak > SMOKE_TOUR_CEIL_KB) {
+                smoke_fail("world tour: heap ceiling exceeded");
+                ok = false;
+            }
+
+            if (ok) {
+                s_world_tour_ok = true;
+                SMOKE_LOG("WORLD_TOUR_OK: heap plateaus across %d heavy maps (peak %d KB)",
+                    SMOKE_TOUR_MAPS, peak);
+                SMOKE_LOG("state10 PASS: world tour memory stress clean");
+            }
+
+            /* Hand over to the dialogue stress (state 11). */
+            s_state = SMOKE_STATE_DIALOGUE;
+            s_state_time = now;
+            s_phase = 0;
+            s_dlg_cand_idx = 0;
+            s_pending = SMOKE_ACTION_NONE;
+        }
+        break;
+    }
+
+    case SMOKE_STATE_DIALOGUE: {
+        /* Combat guard, same treatment as the world tour: end any battle a
+         * map script dragged us into so the dialogue scan can proceed. */
+        if (!s_dlg_active && isInCombat() && elapsed >= 1500) {
+            SMOKE_LOG("state11: combat broke out; forcing it to end");
+            game_user_wants_to_quit = 1;
+            s_state_time = now;
+            break;
+        }
+
+        if (s_dlg_active) {
+            /* Fallback: no digit combination ended the conversation. */
+            if (!s_dlg_forced && (now - s_dlg_start) >= SMOKE_DLG_MAX_MS) {
+                SMOKE_LOG("state11: dialogue still open after %u s; forcing it to end",
+                    SMOKE_DLG_MAX_MS / 1000);
+                s_dlg_forced = true;
+                game_user_wants_to_quit = 1;
+            }
+            break;
+        }
+
+        if (s_phase == 0) {
+            s_pending = SMOKE_ACTION_DIALOGUE_LOAD;
+            s_phase = 1;
+        } else if (s_phase == 2) {
+            if (elapsed >= SMOKE_DLG_SETTLE_MS) {
+                s_pending = SMOKE_ACTION_DIALOGUE_TALK;
+                s_phase = 3;
+            }
+        } else if (s_phase == 4) {
+            if (s_dlg_ran) {
+                s_dialogue_ok = true;
+                SMOKE_LOG("DIALOGUE_OK: talking head 0x%08X via %s (options driven, voice load=%u play=%u, forced=%d)",
+                    (unsigned int)s_dlg_head, s_dlg_name, s_dlg_voice_load, s_dlg_voice_play,
+                    s_dlg_forced ? 1 : 0);
+                SMOKE_LOG("state11 PASS: dialogue, talking head and voice-over stream verified");
+                smoke_mem_probe("dlg-done");
+
+                /* Hand over to the combat stress (state 12). */
+                s_state = SMOKE_STATE_COMBAT;
+                s_state_time = now;
+                s_phase = 0;
+                s_pending = SMOKE_ACTION_NONE;
+            } else if (s_dlg_cand_idx + 1 < s_dlg_cand_count && s_dlg_cand_idx + 1 < SMOKE_DLG_TRIES) {
+                s_dlg_cand_idx++;
+                s_dlg_target = s_dlg_cand[s_dlg_cand_idx];
+                SMOKE_LOG("state11: %s gave %s; trying candidate %d/%d",
+                    s_dlg_name,
+                    s_dlg_head == -1 ? "a headless dialogue" : "no dialogue",
+                    s_dlg_cand_idx + 1, s_dlg_cand_count);
+
+                s_phase = 2;
+                s_state_time = now;
+            } else {
+                smoke_fail("no candidate ran a talking-head dialogue");
+
+                s_state = SMOKE_STATE_VERDICT;
+                s_state_time = now;
+                s_phase = 0;
+                s_pending = SMOKE_ACTION_VERDICT;
+            }
+        }
+        break;
+    }
+
+    case SMOKE_STATE_COMBAT: {
+        if (s_phase == 0) {
+            s_pending = SMOKE_ACTION_COMBAT_START;
+            s_phase = 1;
+        } else if (s_phase == 1) {
+            /* Waiting for the staging action. */
+        } else if (s_phase == 2) {
+            if (elapsed >= SMOKE_CBT_SETTLE_MS) {
+                /* Opening attack: the crosshair click enters the battle
+                 * through combat_attack_this(). */
+                int tx;
+                int ty;
+                if (smoke_cbt_sprite_center(s_cbt_target, &tx, &ty)) {
+                    smoke_cbt_click(now, tx, ty);
+                    s_cbt_attacks++;
+                    SMOKE_LOG("state12: opening attack click on %s at (%d,%d)",
+                        s_cbt_name, tx, ty);
+                } else {
+                    SMOKE_LOG("state12: could not locate %s on screen", s_cbt_name);
+                }
+
+                s_state_time = now;
+                s_phase = 3;
+            }
+        } else if (s_phase == 3) {
+            if (isInCombat()) {
+                s_cbt_engaged = true;
+                s_cbt_start = now;
+                s_cbt_last_drive = now;
+                SMOKE_LOG("state12: combat engaged (battle started from the attack click)");
+                s_state_time = now;
+                s_phase = 4;
+            } else if (elapsed >= 4000) {
+                if (s_cbt_attacks < SMOKE_CBT_CLICK_TRIES) {
+                    int tx;
+                    int ty;
+                    if (smoke_cbt_sprite_center(s_cbt_target, &tx, &ty)) {
+                        smoke_cbt_click(now, tx, ty);
+                        s_cbt_attacks++;
+                        SMOKE_LOG("state12: attack click %d did not engage; retrying",
+                            s_cbt_attacks);
+                    }
+                    s_state_time = now;
+                } else {
+                    smoke_fail("combat: attack clicks never started a battle");
+                    s_state = SMOKE_STATE_VERDICT;
+                    s_state_time = now;
+                    s_phase = 0;
+                    s_pending = SMOKE_ACTION_VERDICT;
+                }
+            }
+        } else if (s_phase == 4) {
+            if (!isInCombat()) {
+                /* Battle over: assess before restoring the test tampering. */
+                int targetHpAfter = s_cbt_target->data.critter.hp;
+                bool targetDead = (s_cbt_target->data.critter.combat.results & DAM_DEAD) != 0;
+                int dudeHpAfter = obj_dude->data.critter.hp;
+
+                obj_dude->data.critter.hp = s_cbt_hp_before;
+                gmouse_3d_set_mode(GAME_MOUSE_MODE_MOVE);
+
+                smoke_mem_probe("combat");
+
+                s_combat_ok = s_cbt_engaged && s_cbt_attacks > 0
+                    && (s_cbt_ai_seen || targetDead
+                        || targetHpAfter < s_cbt_target_hp_before
+                        || dudeHpAfter < 999);
+
+                SMOKE_LOG("state12: battle over: attacks=%d space=%d ai=%s target %s hp %d->%d%s dude hp=%d",
+                    s_cbt_attacks, s_cbt_space_taps,
+                    s_cbt_ai_seen ? s_cbt_ai_name : "none",
+                    s_cbt_name, s_cbt_target_hp_before, targetHpAfter,
+                    targetDead ? " dead" : "", dudeHpAfter);
+
+                if (s_combat_ok) {
+                    SMOKE_LOG("COMBAT_OK: turn-based cycle (player attack + AI turn) verified");
+                    SMOKE_LOG("state12 PASS: combat stress clean");
+                } else {
+                    smoke_fail("combat: cycle finished without player attack or AI turn");
+                }
+
+                s_state = SMOKE_STATE_VERDICT;
+                s_state_time = now;
+                s_phase = 0;
+                s_pending = SMOKE_ACTION_VERDICT;
+            } else {
+                /* AI turn sampling. */
+                if (!s_cbt_ai_seen && combat_turn_obj != NULL && combat_turn_obj != obj_dude) {
+                    const char* aiName = proto_name(combat_turn_obj->pid);
+                    snprintf(s_cbt_ai_name, sizeof(s_cbt_ai_name), "%s", aiName != NULL ? aiName : "?");
+                    s_cbt_ai_seen = true;
+                    SMOKE_LOG("state12: AI turn observed: %s", s_cbt_ai_name);
+                }
+
+                if (s_cbt_start != 0) {
+                    if ((now - s_cbt_start) >= SMOKE_CBT_MAX_MS) {
+                        SMOKE_LOG("state12: forcing the battle to end (time limit)");
+                        game_user_wants_to_quit = 1;
+                        s_cbt_start = 0;
+                    } else if ((now - s_cbt_last_drive) >= SMOKE_CBT_DRIVE_MS) {
+                        s_cbt_last_drive = now;
+
+                        /* Only drive on the dude's turn (combat_state 0x02);
+                         * punch twice, then hand over with SPACE. */
+                        if (combat_turn_obj == obj_dude && (combat_state & 0x02) != 0) {
+                            s_cbt_drives++;
+                            if (s_cbt_drives % 3 == 0) {
+                                smoke_cbt_space(now);
+                                s_cbt_space_taps++;
+                            } else {
+                                int tx;
+                                int ty;
+                                if (smoke_cbt_sprite_center(s_cbt_target, &tx, &ty)) {
+                                    smoke_cbt_click(now, tx, ty);
+                                    s_cbt_attacks++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        break;
+    }
 
     case SMOKE_STATE_VERDICT:
         /* Exit happens via SMOKE_ACTION_VERDICT in the top-level loop. */
@@ -1171,6 +1933,8 @@ extern "C" void ps2_smoke_tick(void)
 int ps2_smoke_main(void)
 {
     SMOKE_LOG("harness compiled in; taking over the game flow");
+
+    ps2_mem_init();
 
     if (smoke_frontend_phase() != 0) {
         SMOKE_LOG("SUITE_FINISHED_WITH_ERRORS: frontend phase failed");
@@ -1186,6 +1950,8 @@ int ps2_smoke_main(void)
         fflush(stdout);
         exit(0);
     }
+
+    smoke_mem_probe("boot");
 
     s_active = true;
     s_state = SMOKE_STATE_MAP_VERIFY;

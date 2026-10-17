@@ -83,6 +83,28 @@ void ps2_mem_stat_dump(const char* tag)
         (unsigned int)(ps2_mem_stat_us / 1000));
     fflush(stdout);
 }
+
+/* F7: engine-side heap view (payload bytes tracked by my_malloc). */
+int ps2_mem_engine_cur_kb(void)
+{
+    return (int)(mem_allocated >> 10);
+}
+
+int ps2_mem_engine_max_kb(void)
+{
+    return (int)(max_allocated >> 10);
+}
+
+void ps2_mem_engine_report(const char* tag)
+{
+    printf("[ps2][smoke] mem: %-12s engine cur=%uK max=%uK blocks=%d maxblocks=%d\n",
+        tag,
+        (unsigned int)(mem_allocated >> 10),
+        (unsigned int)(max_allocated >> 10),
+        num_blocks,
+        max_blocks);
+    fflush(stdout);
+}
 #endif
 
 // 0x4AEBE0

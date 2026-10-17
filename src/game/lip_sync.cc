@@ -63,6 +63,14 @@ LipsData lip_info = {
 // 0x505958
 int speechStartTime = 0;
 
+#ifdef PS2_DEV_SMOKE_TEST
+// F7 dialogue stress: voice-over counters for the smoke suite. A successful
+// load means the .LIP/ACM pair was opened, a successful play means the ACM
+// started streaming through the sound system (audsrv on PS2).
+unsigned int ps2_lips_load_count = 0;
+unsigned int ps2_lips_play_count = 0;
+#endif
+
 // 0x612220
 static char lips_subdir_name[14];
 
@@ -178,6 +186,11 @@ int lips_play_speech()
         // NOTE: Uninline.
         lips_stop_speech();
     }
+#ifdef PS2_DEV_SMOKE_TEST
+    else {
+        ps2_lips_play_count++;
+    }
+#endif
 
     return 0;
 }
@@ -416,6 +429,10 @@ int lips_load_file(const char* audioFileName, const char* headFileName)
 
     head_marker_current = 0;
     head_phoneme_current = lip_info.phonemes[0];
+
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_lips_load_count++;
+#endif
 
     return 0;
 }

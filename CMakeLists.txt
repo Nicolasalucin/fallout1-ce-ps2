@@ -307,6 +307,7 @@ if(PS2)
         "src/platform/ps2/main.cc"
         "src/platform/ps2/boot.c"
         "src/platform/ps2/ps2_time.c"
+        "src/platform/ps2/ps2_mem.c"
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
         "src/platform/ps2/fs.c"
@@ -375,6 +376,7 @@ if(PS2)
     set_source_files_properties(
         src/platform/ps2/boot.c
         src/platform/ps2/ps2_time.c
+        src/platform/ps2/ps2_mem.c
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
         src/platform/ps2/fs.c
