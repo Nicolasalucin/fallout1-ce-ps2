@@ -7,15 +7,23 @@
  * validation sequence:
  *
  *   state 1  map render + script VM stability (dude present, frames advance)
- *   state 2  inventory open (I) / close (Escape)
- *   state 3  Pip-Boy open (P) / close (Escape)
- *   state 4  map streaming stress (JUNKENT.MAP, timed)
- *   state 5  save/load round-trip (skipped until the F6 memory card backend)
- *   state 6  verdict + exit()
+ *   state 2  click-to-move: aims the cursor at a neighbour tile and clicks
+ *            through the same SDL event path the pad uses; catches movement
+ *            stutters (frame gap instrumentation, see below)
+ *   state 3  inventory open (I) / close (Escape)
+ *   state 4  Pip-Boy open (P) / close (Escape)
+ *   state 5  map streaming stress (JUNKENT.MAP, timed)
+ *   state 6  save/load round-trip (skipped until the F6 memory card backend)
+ *   state 7  verdict + exit()
+ *
+ * A stall detector runs on every event pump tick: the worst gap between two
+ * ticks (i.e. the longest the engine went without servicing a frame) is
+ * recorded together with the state it happened in. If it exceeds a sane
+ * budget the suite reports a stutter failure instead of passing silently.
  *
  * State transitions run from ps2_smoke_tick(), which the SDL shim calls on
  * every event pump - including inside modal screens, where the engine runs
- * its own event loops. Only synthetic key taps and timers are handled there;
+ * its own event loops. Only synthetic input and timers are handled there;
  * heavy engine work (map loads, the verdict) executes from the harness' own
  * top-level game loop, never from inside an event pump.
  */
@@ -59,9 +67,12 @@ namespace fallout {
 #define SMOKE_START_MAP "V13ENT.MAP"
 #define SMOKE_STREAM_MAP "JUNKENT.MAP"
 #define SMOKE_WATCHDOG_MS 90000
+#define SMOKE_STALL_MS 1500
+#define SMOKE_WALK_ATTEMPTS 4
 
 typedef enum SmokeState {
     SMOKE_STATE_MAP_VERIFY,
+    SMOKE_STATE_WALK,
     SMOKE_STATE_INVENTORY,
     SMOKE_STATE_PIPBOY,
     SMOKE_STATE_MAP_STREAM,
@@ -75,6 +86,15 @@ typedef enum SmokeAction {
     SMOKE_ACTION_VERDICT,
 } SmokeAction;
 
+/* Screen offsets (from the dude) of the neighbour tiles the walk state tries
+ * to click, in order: east, west, south, north. */
+static const int s_walk_offsets[SMOKE_WALK_ATTEMPTS][2] = {
+    { 20, 0 },
+    { -20, 0 },
+    { 0, 20 },
+    { 0, -20 },
+};
+
 static bool s_active = false;
 static SmokeState s_state = SMOKE_STATE_MAP_VERIFY;
 static unsigned int s_state_time = 0;
@@ -86,11 +106,28 @@ static SmokeAction s_pending = SMOKE_ACTION_NONE;
 static int s_tap_scancode = -1;
 static unsigned int s_tap_release_at = 0;
 
+/* Stall detector (updated on every event pump tick). */
+static unsigned int s_tick_last = 0;
+static unsigned int s_worst_gap = 0;
+static SmokeState s_worst_gap_state = SMOKE_STATE_MAP_VERIFY;
+
+/* Walk state. */
+static int s_walk_attempt = 0;
+static int s_walk_tile_before = 0;
+static unsigned int s_walk_click_time = 0;
+static bool s_walk_moved = false;
+
+/* Set while a blocking engine action (map load) runs from the top-level
+ * loop: the stall detector must not count the load itself as a stutter. */
+static bool s_in_blocking_action = false;
+
 static const char* smoke_state_name(SmokeState state)
 {
     switch (state) {
     case SMOKE_STATE_MAP_VERIFY:
         return "map-verify";
+    case SMOKE_STATE_WALK:
+        return "walk";
     case SMOKE_STATE_INVENTORY:
         return "inventory";
     case SMOKE_STATE_PIPBOY:
@@ -191,11 +228,13 @@ static void smoke_run_pending(unsigned int now)
     case SMOKE_ACTION_MAP_STREAM: {
         s_pending = SMOKE_ACTION_NONE;
 
-        SMOKE_LOG("state4: streaming %s ...", SMOKE_STREAM_MAP);
+        SMOKE_LOG("state5: streaming %s ...", SMOKE_STREAM_MAP);
 
         unsigned int start = now;
         char mapName[] = SMOKE_STREAM_MAP;
+        s_in_blocking_action = true;
         int rc = map_load(mapName);
+        s_in_blocking_action = false;
 
         if (rc == -1) {
             smoke_fail("map_load(JUNKENT.MAP) failed");
@@ -203,9 +242,11 @@ static void smoke_run_pending(unsigned int now)
             PlayCityMapMusic();
             obj_turn_on(obj_dude, NULL);
             tile_refresh_display();
-            SMOKE_LOG("state4: %s streamed in %u ms", SMOKE_STREAM_MAP, ps2_time_ms() - start);
+            SMOKE_LOG("state5: %s streamed in %u ms", SMOKE_STREAM_MAP, ps2_time_ms() - start);
         }
 
+        /* Blocking load - do not count it as a frame gap. */
+        s_tick_last = 0;
         s_phase = 1;
         s_state_time = ps2_time_ms();
         break;
@@ -214,8 +255,18 @@ static void smoke_run_pending(unsigned int now)
     case SMOKE_ACTION_VERDICT:
         s_pending = SMOKE_ACTION_NONE;
 
-        SMOKE_LOG("summary: map=%s inventory=ok pipboy=ok streaming=%s save-load=skipped",
-            SMOKE_START_MAP, SMOKE_STREAM_MAP);
+        if (s_worst_gap > SMOKE_STALL_MS) {
+            SMOKE_LOG("FAIL: stutter detected: worst frame gap %u ms (state %s)",
+                s_worst_gap, smoke_state_name(s_worst_gap_state));
+            s_failures++;
+        }
+
+        SMOKE_LOG("perf: suite %u ms, %u top-level frames, worst frame gap %u ms (%s)",
+            now - s_suite_start, s_frames, s_worst_gap, smoke_state_name(s_worst_gap_state));
+
+        SMOKE_LOG("summary: map=%s walk=%s inventory=ok pipboy=ok streaming=%s save-load=skipped",
+            SMOKE_START_MAP, s_walk_moved ? "ok" : "skip",
+            SMOKE_STREAM_MAP);
 
         if (s_failures == 0) {
             SMOKE_LOG("SUITE_FINISHED_SUCCESS: All game subsystems verified!");
@@ -240,6 +291,17 @@ extern "C" void ps2_smoke_tick(void)
     }
 
     unsigned int now = ps2_time_ms();
+
+    /* Stall detector: worst gap between two pumps (blocking loads excluded). */
+    if (!s_in_blocking_action && s_tick_last != 0) {
+        unsigned int gap = now - s_tick_last;
+        if (gap > s_worst_gap) {
+            s_worst_gap = gap;
+            s_worst_gap_state = s_state;
+        }
+    }
+    s_tick_last = now;
+
     unsigned int elapsed = now - s_state_time;
 
     smoke_key_tap_finish(now);
@@ -257,15 +319,68 @@ extern "C" void ps2_smoke_tick(void)
         if (elapsed >= 1200) {
             smoke_check_dude("map-v13ent");
             SMOKE_LOG("state1 PASS: map render + script VM stable (%u frames)", s_frames);
-            s_state = SMOKE_STATE_INVENTORY;
+            s_state = SMOKE_STATE_WALK;
             s_state_time = now;
             s_phase = 0;
+            s_walk_attempt = 0;
+            s_walk_moved = false;
+            s_walk_tile_before = obj_dude != NULL ? obj_dude->tile : 0;
+        }
+        break;
+
+    case SMOKE_STATE_WALK:
+        if (s_phase == 0) {
+            /* Aim the cursor at a neighbour tile (screen offset from the dude)
+             * and click - the same SDL path the pad drives. */
+            const int* off = s_walk_offsets[s_walk_attempt];
+            int mx;
+            int my;
+            int tx;
+            int ty;
+
+            mouse_get_position(&mx, &my);
+            tx = obj_dude->sx + off[0];
+            ty = obj_dude->sy + off[1];
+            if (tx < 12) tx = 12;
+            if (tx > 627) tx = 627;
+            if (ty < 44) ty = 44; /* keep clear of the interface bar */
+            if (ty > 468) ty = 468;
+            ps2_sdl_post_mouse_move(tx - mx, ty - my);
+            s_state_time = now;
+            s_phase = 1;
+        } else if (s_phase == 1 && elapsed >= 250) {
+            ps2_sdl_post_mouse_button(SDL_BUTTON_LEFT, 1);
+            s_state_time = now;
+            s_phase = 2;
+        } else if (s_phase == 2 && elapsed >= 80) {
+            ps2_sdl_post_mouse_button(SDL_BUTTON_LEFT, 0);
+            s_walk_click_time = now;
+            s_state_time = now;
+            s_phase = 3;
+        } else if (s_phase == 3) {
+            if (obj_dude->tile != s_walk_tile_before) {
+                s_walk_moved = true;
+                SMOKE_LOG("state2 PASS: dude walked tile %d -> %d (click to move took %u ms)",
+                    s_walk_tile_before, obj_dude->tile, now - s_walk_click_time);
+                s_state = SMOKE_STATE_INVENTORY;
+                s_state_time = now;
+                s_phase = 0;
+            } else if (elapsed >= 1200) {
+                if (++s_walk_attempt >= SMOKE_WALK_ATTEMPTS) {
+                    SMOKE_LOG("state2 SKIP: click-to-move did not move the dude in %d attempts", SMOKE_WALK_ATTEMPTS);
+                    s_state = SMOKE_STATE_INVENTORY;
+                    s_state_time = now;
+                    s_phase = 0;
+                } else {
+                    s_phase = 0;
+                }
+            }
         }
         break;
 
     case SMOKE_STATE_INVENTORY:
         if (s_phase == 0) {
-            SMOKE_LOG("state2: opening inventory (I)");
+            SMOKE_LOG("state3: opening inventory (I)");
             smoke_key_tap(SDL_SCANCODE_I, now);
             s_phase = 1;
             s_state_time = now;
@@ -274,7 +389,7 @@ extern "C" void ps2_smoke_tick(void)
             s_phase = 2;
             s_state_time = now;
         } else if (s_phase == 2 && elapsed >= 500) {
-            SMOKE_LOG("state2 PASS: inventory open/close clean");
+            SMOKE_LOG("state3 PASS: inventory open/close clean");
             s_state = SMOKE_STATE_PIPBOY;
             s_state_time = now;
             s_phase = 0;
@@ -283,7 +398,7 @@ extern "C" void ps2_smoke_tick(void)
 
     case SMOKE_STATE_PIPBOY:
         if (s_phase == 0) {
-            SMOKE_LOG("state3: opening Pip-Boy (P)");
+            SMOKE_LOG("state4: opening Pip-Boy (P)");
             smoke_key_tap(SDL_SCANCODE_P, now);
             s_phase = 1;
             s_state_time = now;
@@ -292,7 +407,7 @@ extern "C" void ps2_smoke_tick(void)
             s_phase = 2;
             s_state_time = now;
         } else if (s_phase == 2 && elapsed >= 500) {
-            SMOKE_LOG("state3 PASS: Pip-Boy open/close clean");
+            SMOKE_LOG("state4 PASS: Pip-Boy open/close clean");
             s_state = SMOKE_STATE_MAP_STREAM;
             s_state_time = now;
             s_phase = 0;
@@ -304,7 +419,7 @@ extern "C" void ps2_smoke_tick(void)
         /* s_phase 0 = waiting for the top-level loop to run the switch. */
         if (s_phase == 1 && elapsed >= 1500) {
             smoke_check_dude("map-junktown");
-            SMOKE_LOG("state4 PASS: map streaming within budget");
+            SMOKE_LOG("state5 PASS: map streaming within budget");
             s_state = SMOKE_STATE_SAVELOAD;
             s_state_time = now;
             s_phase = 0;
@@ -313,7 +428,7 @@ extern "C" void ps2_smoke_tick(void)
 
     case SMOKE_STATE_SAVELOAD:
         if (elapsed >= 200) {
-            SMOKE_LOG("state5 SKIPPED: save/load round-trip pending F6 (memory card backend)");
+            SMOKE_LOG("state6 SKIPPED: save/load round-trip pending F6 (memory card backend)");
             s_state = SMOKE_STATE_VERDICT;
             s_state_time = now;
             s_phase = 0;
@@ -346,6 +461,9 @@ int ps2_smoke_main(void)
     s_failures = 0;
     s_frames = 0;
     s_pending = SMOKE_ACTION_NONE;
+    s_tick_last = 0;
+    s_worst_gap = 0;
+    s_worst_gap_state = SMOKE_STATE_MAP_VERIFY;
 
     scr_enable();
 

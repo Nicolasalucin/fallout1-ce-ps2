@@ -8,10 +8,13 @@
  * compiled in, gnw_main() hands control to the harness right after engine
  * init: the intro movies and the main menu are skipped, a premade dude is
  * booted straight into the starting map and a scripted sequence exercises
- * the map, the inventory, the Pip-Boy, map streaming and (once F6 lands) the
- * save/load round-trip. The harness logs [ps2][smoke] lines to the EE
- * console and terminates the ELF with exit(), so tools/run_smoke.sh can grep
- * the verdict out of the emulator log without any user interaction.
+ * the map, click-to-move, the inventory, the Pip-Boy, map streaming and
+ * (once F6 lands) the save/load round-trip. The harness logs [ps2][smoke]
+ * lines to the EE console and terminates the ELF with exit(), so
+ * tools/run_smoke.sh can grep the verdict out of the emulator log without
+ * any user interaction. A stall detector reports the worst frame gap, so
+ * freezes (like movement stutters) fail the suite instead of passing
+ * unnoticed.
  */
 
 #ifdef PS2_DEV_SMOKE_TEST
