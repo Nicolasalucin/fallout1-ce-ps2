@@ -757,16 +757,25 @@ extern "C" void ps2_smoke_tick(void)
 
     case SMOKE_STATE_PIPBOY:
         if (s_phase == 0) {
-            SMOKE_LOG("state4: opening Pip-Boy (P)");
+            SMOKE_LOG("state4: opening Pip-Boy (P), pass 1/2 (cold)");
             smoke_key_tap(SDL_SCANCODE_P, now);
             s_phase = 1;
             s_state_time = now;
-        } else if (s_phase == 1 && elapsed >= 1000) {
+        } else if (s_phase == 1 && elapsed >= 1500) {
             smoke_key_tap(SDL_SCANCODE_ESCAPE, now);
             s_phase = 2;
             s_state_time = now;
-        } else if (s_phase == 2 && elapsed >= 500) {
-            SMOKE_LOG("state4 PASS: Pip-Boy open/close clean");
+        } else if (s_phase == 2 && elapsed >= 700) {
+            SMOKE_LOG("state4: opening Pip-Boy (P), pass 2/2 (warm)");
+            smoke_key_tap(SDL_SCANCODE_P, now);
+            s_phase = 3;
+            s_state_time = now;
+        } else if (s_phase == 3 && elapsed >= 1500) {
+            smoke_key_tap(SDL_SCANCODE_ESCAPE, now);
+            s_phase = 4;
+            s_state_time = now;
+        } else if (s_phase == 4 && elapsed >= 700) {
+            SMOKE_LOG("state4 PASS: Pip-Boy open/close clean (cold + warm passes)");
             s_state = SMOKE_STATE_OPTIONS;
             s_state_time = now;
             s_phase = 0;

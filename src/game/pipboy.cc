@@ -456,6 +456,11 @@ static MessageListItem pipmesg;
 // 0x662B88
 static MessageList pipboy_message_file;
 
+/* The Pip-Boy message file never changes during a session, so it is loaded
+ * once and kept across openings: a warm open otherwise re-reads and
+ * re-parses the whole file (~75 ms on EE, measured in F5.4). */
+static bool pipboy_message_loaded = false;
+
 // 0x662AC8
 static PipboySortableEntry sortlist[24];
 
@@ -643,15 +648,32 @@ static int StartPipboy(int intent)
     hot_line_start = 0;
     hot_back_line = 0;
 
-    if (!message_init(&pipboy_message_file)) {
-        return -1;
-    }
+    if (!pipboy_message_loaded) {
+        if (!message_init(&pipboy_message_file)) {
+            return -1;
+        }
 
-    char path[COMPAT_MAX_PATH];
-    snprintf(path, sizeof(path), "%s%s", msg_path, "pipboy.msg");
+        char path[COMPAT_MAX_PATH];
+        snprintf(path, sizeof(path), "%s%s", msg_path, "pipboy.msg");
 
-    if (!(message_load(&pipboy_message_file, path))) {
-        return -1;
+        if (!(message_load(&pipboy_message_file, path))) {
+            return -1;
+        }
+
+        pipboy_message_loaded = true;
+
+#ifdef PS2_DEV_SMOKE_TEST
+        {
+            unsigned int bytes = 0;
+            for (int i = 0; i < pipboy_message_file.entries_num; i++) {
+                bytes += (unsigned int)(strlen(pipboy_message_file.entries[i].audio)
+                    + strlen(pipboy_message_file.entries[i].text) + 2 + sizeof(MessageListItem));
+            }
+            printf("[ps2][smoke] pipboy-cache: %d entries, ~%u bytes retained\n",
+                pipboy_message_file.entries_num, bytes);
+            fflush(stdout);
+        }
+#endif
     }
 
     PS2_PIPB_TIMER_PHASE("message");
@@ -854,7 +876,8 @@ static void EndPipboy()
 
     win_delete(pip_win);
 
-    message_exit(&pipboy_message_file);
+    /* pipboy_message_file is intentionally kept loaded for the next open
+     * (it never changes during a session, see StartPipboy). */
 
     for (int index = 0; index < PIPBOY_FRM_COUNT; index++) {
         art_ptr_unlock(grphkey[index]);
