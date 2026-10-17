@@ -104,6 +104,11 @@ static void db_default_free(void* ptr);
 static void db_preload_buffer(DB_FILE* stream);
 static int fread_short(FILE* stream, unsigned short* s);
 
+#ifdef __PS2__
+static DB_FILE* db_slurp_loose_stream(FILE* stream, int flags);
+static unsigned char* db_slurp_dat_entry_chunked(FILE* stream, int length);
+#endif
+
 static inline bool fileFindIsDirectory(DB_FIND_DATA* find_data);
 static inline char* fileFindGetName(DB_FIND_DATA* find_data);
 
@@ -606,6 +611,18 @@ DB_FILE* db_fopen(const char* filename, const char* mode)
         }
 
         if (stream != NULL) {
+#ifdef __PS2__
+            // PS2 port: read-only loose files (maps, overrides) are slurped
+            // into RAM. The IOP has no page cache and every stdio read is a
+            // synchronous SIF round trip, so serving the stream from memory
+            // removes the dominant cost of map and art loading.
+            if (mode_value == 1) {
+                DB_FILE* slurped = db_slurp_loose_stream(stream, flags);
+                if (slurped != NULL) {
+                    return slurped;
+                }
+            }
+#endif
             return db_add_fp_rec(stream, NULL, 0, flags | 0x4);
         }
     }
@@ -649,8 +666,44 @@ DB_FILE* db_fopen(const char* filename, const char* mode)
         }
         break;
     case 32:
+#ifdef __PS2__
+        // PS2 port: slurp uncompressed DAT entries into RAM. The legacy
+        // reader performs a fseek+fgetc+ftell per byte (see db_fgetc), which
+        // turns every header parse into thousands of IOP round trips.
+        if (de.length > 0) {
+            buf = (unsigned char*)internal_malloc(de.length);
+            if (buf != NULL) {
+                if (fread(buf, 1, de.length, current_database->stream) == (size_t)de.length) {
+                    DB_FILE* slurped = db_add_fp_rec(NULL, buf, de.length, flags | 0x10 | 0x8);
+                    if (slurped != NULL) {
+                        return slurped;
+                    }
+                }
+
+                internal_free(buf);
+            }
+
+            // Rewind and fall back to the legacy streaming reader.
+            fseek(current_database->stream, de.offset, SEEK_SET);
+        }
+#endif
         return db_add_fp_rec(current_database->stream, NULL, de.length, flags | 0x20 | 0x8);
     case 64:
+#ifdef __PS2__
+        // PS2 port: decode the entire chunked entry into RAM once.
+        buf = db_slurp_dat_entry_chunked(current_database->stream, de.length);
+        if (buf != NULL) {
+            DB_FILE* slurped = db_add_fp_rec(NULL, buf, de.length, flags | 0x10 | 0x8);
+            if (slurped != NULL) {
+                return slurped;
+            }
+
+            internal_free(buf);
+        }
+
+        // Rewind and fall back to the legacy streaming reader.
+        fseek(current_database->stream, de.offset, SEEK_SET);
+#endif
         buf = (unsigned char*)internal_malloc(0x4000);
         if (buf != NULL) {
             return db_add_fp_rec(current_database->stream, buf, de.length, flags | 0x40 | 0x8);
@@ -2716,6 +2769,103 @@ static void db_preload_buffer(DB_FILE* stream)
         }
     }
 }
+
+#ifdef __PS2__
+// PS2 port: slurps a DAT entry stored as a sequence of 16 KiB chunks (each
+// raw or LZSS-compressed, mirroring db_preload_buffer) into a single RAM
+// buffer of `length` bytes. Returns NULL when the entry cannot be read
+// completely; the caller then falls back to the legacy streaming reader.
+static unsigned char* db_slurp_dat_entry_chunked(FILE* stream, int length)
+{
+    unsigned char* buf;
+    int pos;
+    unsigned short chunk_size;
+
+    if (length <= 0) {
+        return NULL;
+    }
+
+    buf = (unsigned char*)internal_malloc(length);
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    pos = 0;
+    while (pos < length) {
+        if (fread_short(stream, &chunk_size) != 0) {
+            break;
+        }
+
+        if ((chunk_size & 0x8000) != 0) {
+            chunk_size &= ~0x8000;
+            if (chunk_size == 0 || chunk_size > length - pos) {
+                break;
+            }
+
+            if (fread(buf + pos, 1, chunk_size, stream) != (size_t)chunk_size) {
+                break;
+            }
+        } else {
+            if (chunk_size == 0 || chunk_size > length - pos) {
+                break;
+            }
+
+            if (lzss_decode_to_buf(stream, buf + pos, chunk_size) != chunk_size) {
+                break;
+            }
+        }
+
+        pos += chunk_size;
+    }
+
+    if (pos != length) {
+        internal_free(buf);
+        return NULL;
+    }
+
+    return buf;
+}
+
+// PS2 port: slurps a read-only loose file into RAM and closes the stdio
+// stream. Returns NULL without consuming the stream on failure so the caller
+// can fall back to the legacy stdio reader.
+static DB_FILE* db_slurp_loose_stream(FILE* stream, int flags)
+{
+    long size;
+    unsigned char* buf;
+    DB_FILE* file;
+
+    size = getFileSize(stream);
+    if (size <= 0) {
+        return NULL;
+    }
+
+    buf = (unsigned char*)internal_malloc((size_t)size);
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    if (fseek(stream, 0, SEEK_SET) != 0
+        || fread(buf, 1, (size_t)size, stream) != (size_t)size) {
+        // Rewind for the legacy reader; the stream is still open.
+        fseek(stream, 0, SEEK_SET);
+        internal_free(buf);
+        return NULL;
+    }
+
+    fclose(stream);
+
+    // NOTE: Loose files are served as raw bytes by the legacy stdio path, so
+    // the text flag is cleared to avoid introducing CR/LF translation in the
+    // in-memory reader. DAT entries keep theirs.
+    file = db_add_fp_rec(NULL, buf, (int)size, (flags & ~(0x4 | 0x2)) | 0x10 | 0x8);
+    if (file == NULL) {
+        internal_free(buf);
+    }
+
+    return file;
+}
+#endif
 
 // 0x4B2970
 static int fread_short(FILE* stream, unsigned short* s)

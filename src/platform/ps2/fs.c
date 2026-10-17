@@ -30,6 +30,19 @@ static char s_roots[PS2_FS_MAX_ROOTS][PS2_FS_ROOT_MAX];
 static int s_root_count;
 static int s_probed;
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load): I/O call counters consumed by the smoke
+ * harness. */
+unsigned int ps2_fs_stat_fopen_calls;
+unsigned int ps2_fs_stat_canonicalize_calls;
+
+void ps2_fs_stat_reset(void)
+{
+    ps2_fs_stat_fopen_calls = 0;
+    ps2_fs_stat_canonicalize_calls = 0;
+}
+#endif
+
 /* opendir with a trailing-slash retry: device roots are accepted both as
  * "mass:" and "mass:/" depending on the driver. */
 static DIR* fs_opendir(const char* dir)
@@ -148,6 +161,9 @@ const char* ps2_fs_root_path(int index)
 
 int ps2_fs_canonicalize(char* path, int allow_missing_last)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_fs_stat_canonicalize_calls++;
+#endif
     char dir[PS2_FS_PATH_MAX];
     const char* colon;
     const char* p;
@@ -324,6 +340,10 @@ FILE* ps2_fs_fopen(const char* path, const char* mode)
     writable = strchr(mode, 'w') != NULL
         || strchr(mode, 'a') != NULL
         || strchr(mode, '+') != NULL;
+
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_fs_stat_fopen_calls++;
+#endif
 
     if (strchr(norm, ':') != NULL) {
         if (ps2_fs_canonicalize(norm, writable) != 0) {

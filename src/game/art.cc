@@ -14,6 +14,10 @@
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/memory.h"
 
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
+
 namespace fallout {
 
 typedef struct ArtListDescription {
@@ -381,6 +385,37 @@ void scale_art(int fid, unsigned char* dest, int width, int height, int pitch)
 }
 
 // 0x41892C
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load). */
+static unsigned int ps2_art_prof_calls;
+static unsigned int ps2_art_prof_misses;
+static unsigned long long ps2_art_prof_us;
+static unsigned int ps2_art_prof_size_calls;
+static unsigned long long ps2_art_prof_size_us;
+static unsigned int ps2_art_prof_load_calls;
+static unsigned long long ps2_art_prof_load_us;
+
+void ps2_art_prof_dump(void)
+{
+    printf("[ps2][smoke] prof: art locks=%u misses=%u time=%u ms, materialize size=%u %u ms load=%u %u ms\n",
+        ps2_art_prof_calls,
+        ps2_art_prof_misses,
+        (unsigned int)(ps2_art_prof_us / 1000),
+        ps2_art_prof_size_calls,
+        (unsigned int)(ps2_art_prof_size_us / 1000),
+        ps2_art_prof_load_calls,
+        (unsigned int)(ps2_art_prof_load_us / 1000));
+    fflush(stdout);
+    ps2_art_prof_calls = 0;
+    ps2_art_prof_misses = 0;
+    ps2_art_prof_us = 0;
+    ps2_art_prof_size_calls = 0;
+    ps2_art_prof_size_us = 0;
+    ps2_art_prof_load_calls = 0;
+    ps2_art_prof_load_us = 0;
+}
+#endif
+
 Art* art_ptr_lock(int fid, CacheEntry** handlePtr)
 {
     if (handlePtr == NULL) {
@@ -388,7 +423,17 @@ Art* art_ptr_lock(int fid, CacheEntry** handlePtr)
     }
 
     Art* art = NULL;
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
     cache_lock(&art_cache, fid, (void**)&art, handlePtr);
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_art_prof_calls++;
+    if (art == NULL) {
+        ps2_art_prof_misses++;
+    }
+    ps2_art_prof_us += ps2_time_us() - prof_t0;
+#endif
     return art;
 }
 
@@ -921,6 +966,9 @@ int art_alias_fid(int fid)
 // 0x4191D8
 int art_data_size(int fid, int* sizePtr)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
     DB_DATABASE* oldDb = INVALID_DATABASE_HANDLE;
     int result = -1;
 
@@ -948,12 +996,20 @@ int art_data_size(int fid, int* sizePtr)
         db_select(oldDb);
     }
 
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_art_prof_size_calls++;
+    ps2_art_prof_size_us += ps2_time_us() - prof_t0;
+#endif
+
     return result;
 }
 
 // 0x41924C
 int art_data_load(int fid, int* sizePtr, unsigned char* data)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
     DB_DATABASE* oldDb = INVALID_DATABASE_HANDLE;
     int result = -1;
 
@@ -973,6 +1029,11 @@ int art_data_load(int fid, int* sizePtr, unsigned char* data)
     if (oldDb != INVALID_DATABASE_HANDLE) {
         db_select(oldDb);
     }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_art_prof_load_calls++;
+    ps2_art_prof_load_us += ps2_time_us() - prof_t0;
+#endif
 
     return result;
 }

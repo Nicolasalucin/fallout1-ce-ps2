@@ -31,6 +31,10 @@
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
 
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
+
 namespace fallout {
 
 #define GAME_TIME_START_YEAR 2161
@@ -1062,11 +1066,65 @@ void script_make_path(char* path)
 }
 
 // 0x492924
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load): per-call script exec/compile timings. */
+static unsigned int ps2_scr_prof_calls;
+static unsigned long long ps2_scr_prof_us;
+static unsigned long long ps2_scr_prof_load_us;
+static unsigned long long ps2_scr_prof_build_us;
+static unsigned long long ps2_scr_prof_exec_us;
+static unsigned int ps2_scr_prof_worst_us;
+static int ps2_scr_prof_worst_sid;
+static int ps2_scr_prof_worst_action;
+
+static void ps2_scr_prof_note(int sid, int action, unsigned int us)
+{
+    ps2_scr_prof_calls++;
+    ps2_scr_prof_us += us;
+    if (us > ps2_scr_prof_worst_us) {
+        ps2_scr_prof_worst_us = us;
+        ps2_scr_prof_worst_sid = sid;
+        ps2_scr_prof_worst_action = action;
+    }
+    if (us > 100000) {
+        printf("[ps2][smoke] prof: exec_script_proc sid=%d action=%d took %u ms\n",
+            sid, action, us / 1000);
+        fflush(stdout);
+    }
+}
+
+void ps2_scr_prof_dump(void)
+{
+    if (ps2_scr_prof_calls != 0) {
+        printf("[ps2][smoke] prof: exec_script_proc total: %u calls, %u ms, loadProgram %u ms, build %u ms, exec %u ms, worst %u ms (sid=%d action=%d)\n",
+            ps2_scr_prof_calls,
+            (unsigned int)(ps2_scr_prof_us / 1000),
+            (unsigned int)(ps2_scr_prof_load_us / 1000),
+            (unsigned int)(ps2_scr_prof_build_us / 1000),
+            (unsigned int)(ps2_scr_prof_exec_us / 1000),
+            (unsigned int)(ps2_scr_prof_worst_us / 1000),
+            ps2_scr_prof_worst_sid,
+            ps2_scr_prof_worst_action);
+        fflush(stdout);
+    }
+    ps2_scr_prof_calls = 0;
+    ps2_scr_prof_us = 0;
+    ps2_scr_prof_load_us = 0;
+    ps2_scr_prof_build_us = 0;
+    ps2_scr_prof_exec_us = 0;
+    ps2_scr_prof_worst_us = 0;
+}
+#endif
+
 int exec_script_proc(int sid, int action)
 {
     if (!script_engine_running) {
         return -1;
     }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
 
     Script* script;
     if (scr_ptr(sid, &script) == -1) {
@@ -1088,7 +1146,13 @@ int exec_script_proc(int sid, int action)
             *pch = '\0';
         }
 
+#ifdef PS2_DEV_SMOKE_TEST
+        uint64_t prof_tl = ps2_time_us();
+#endif
         script->program = loadProgram(name);
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_scr_prof_load_us += ps2_time_us() - prof_tl;
+#endif
         if (script->program == NULL) {
             debug_printf("\nError: exec_script_proc: script load failed!");
             return -1;
@@ -1123,17 +1187,33 @@ int exec_script_proc(int sid, int action)
 
     script->scr_flags |= SCRIPT_FLAG_0x04;
 
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_te = ps2_time_us();
+#endif
     if (programLoaded) {
+#ifdef PS2_DEV_SMOKE_TEST
+        uint64_t prof_tb = ps2_time_us();
+#endif
         scr_build_lookup_table(script);
         runProgram(program);
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_scr_prof_build_us += ps2_time_us() - prof_tb;
+#endif
         interpretSetCPUBurstSize(5000);
         updatePrograms();
         interpretSetCPUBurstSize(10);
     } else {
         executeProcedure(program, proc);
     }
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_scr_prof_exec_us += ps2_time_us() - prof_te;
+#endif
 
     script->source = NULL;
+
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_scr_prof_note(sid, action, (unsigned int)(ps2_time_us() - prof_t0));
+#endif
 
     return 0;
 }

@@ -7,6 +7,10 @@
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
+
 namespace fallout {
 
 // A special value that denotes a beginning of a memory block data.
@@ -57,6 +61,30 @@ static size_t mem_allocated = 0;
 // 0x539D30
 static size_t max_allocated = 0;
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load): allocation pressure/time counters. */
+unsigned int ps2_mem_stat_allocs;
+unsigned int ps2_mem_stat_frees;
+unsigned long long ps2_mem_stat_us;
+
+void ps2_mem_stat_reset(void)
+{
+    ps2_mem_stat_allocs = 0;
+    ps2_mem_stat_frees = 0;
+    ps2_mem_stat_us = 0;
+}
+
+void ps2_mem_stat_dump(const char* tag)
+{
+    printf("[ps2][smoke] prof: mem %s: allocs=%u frees=%u time=%u ms\n",
+        tag,
+        ps2_mem_stat_allocs,
+        ps2_mem_stat_frees,
+        (unsigned int)(ps2_mem_stat_us / 1000));
+    fflush(stdout);
+}
+#endif
+
 // 0x4AEBE0
 char* mem_strdup(const char* string)
 {
@@ -71,7 +99,15 @@ char* mem_strdup(const char* string)
 // 0x4AEC30
 void* mem_malloc(size_t size)
 {
-    return p_malloc(size);
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
+    void* ptr = p_malloc(size);
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_mem_stat_allocs++;
+    ps2_mem_stat_us += ps2_time_us() - prof_t0;
+#endif
+    return ptr;
 }
 
 // 0x4AEC38
@@ -106,7 +142,15 @@ static void* my_malloc(size_t size)
 // 0x4AECB0
 void* mem_realloc(void* ptr, size_t size)
 {
-    return p_realloc(ptr, size);
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
+    void* newPtr = p_realloc(ptr, size);
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_mem_stat_allocs++;
+    ps2_mem_stat_us += ps2_time_us() - prof_t0;
+#endif
+    return newPtr;
 }
 
 // 0x4AECB8
@@ -157,7 +201,14 @@ static void* my_realloc(void* ptr, size_t size)
 // 0x4AED84
 void mem_free(void* ptr)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
     p_free(ptr);
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_mem_stat_frees++;
+    ps2_mem_stat_us += ps2_time_us() - prof_t0;
+#endif
 }
 
 // 0x4AED8C

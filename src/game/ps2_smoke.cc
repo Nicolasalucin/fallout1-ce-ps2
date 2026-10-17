@@ -55,6 +55,13 @@
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
 
+extern "C" {
+/* TEMP profiling counters (F5.2 map load, see fs.c). */
+extern unsigned int ps2_fs_stat_fopen_calls;
+extern unsigned int ps2_fs_stat_canonicalize_calls;
+extern void ps2_fs_stat_reset(void);
+}
+
 namespace fallout {
 
 #define SMOKE_LOG(...)                     \
@@ -204,10 +211,13 @@ static int smoke_boot_game(void)
     mouse_show();
 
     char mapName[] = SMOKE_START_MAP;
+    ps2_fs_stat_reset();
     if (map_load(mapName) == -1) {
         SMOKE_LOG("FAIL: map_load(%s) failed", SMOKE_START_MAP);
         return -1;
     }
+    SMOKE_LOG("io-stats boot: fopen=%u canonicalize=%u",
+        ps2_fs_stat_fopen_calls, ps2_fs_stat_canonicalize_calls);
 
     PlayCityMapMusic();
 
@@ -232,9 +242,12 @@ static void smoke_run_pending(unsigned int now)
 
         unsigned int start = now;
         char mapName[] = SMOKE_STREAM_MAP;
+        ps2_fs_stat_reset();
         s_in_blocking_action = true;
         int rc = map_load(mapName);
         s_in_blocking_action = false;
+        SMOKE_LOG("io-stats junktown: fopen=%u canonicalize=%u",
+            ps2_fs_stat_fopen_calls, ps2_fs_stat_canonicalize_calls);
 
         if (rc == -1) {
             smoke_fail("map_load(JUNKENT.MAP) failed");

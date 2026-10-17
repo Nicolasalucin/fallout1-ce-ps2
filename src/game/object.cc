@@ -29,6 +29,10 @@
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
 
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
+
 namespace fallout {
 
 static int obj_read_obj(Object* obj, DB_FILE* stream);
@@ -437,9 +441,47 @@ static int obj_read_obj(Object* obj, DB_FILE* stream)
 }
 
 // 0x47AAF4
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load). */
+static int ps2_obj_prof_count;
+static unsigned long long ps2_obj_prof_read_us;
+static unsigned long long ps2_obj_prof_inv_us;
+static int ps2_obj_prof_inv_items;
+static unsigned long long ps2_obj_prof_lock_us;
+static int ps2_obj_prof_lock_calls;
+static unsigned long long ps2_obj_prof_inner_create_us;
+static unsigned long long ps2_obj_prof_scrptr_us;
+static unsigned long long ps2_obj_prof_vio_us;
+static unsigned long long ps2_obj_prof_ins_us;
+static unsigned long long ps2_obj_prof_loop_us;
+static unsigned long long ps2_obj_prof_reb_us;
+#endif
+
 int obj_load(DB_FILE* stream)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t0 = ps2_time_us();
+#endif
     int rc = obj_load_func(stream);
+
+#ifdef PS2_DEV_SMOKE_TEST
+    printf("[ps2][smoke] prof: obj-load detail: %d objects, read %u ms, inv %d items %u ms, locks %d %u ms, loop %u ms\n",
+        ps2_obj_prof_count,
+        (unsigned int)(ps2_obj_prof_read_us / 1000),
+        ps2_obj_prof_inv_items,
+        (unsigned int)(ps2_obj_prof_inv_us / 1000),
+        ps2_obj_prof_lock_calls,
+        (unsigned int)(ps2_obj_prof_lock_us / 1000),
+        (unsigned int)((ps2_time_us() - prof_t0) / 1000));
+    printf("[ps2][smoke] prof: obj-load inner: cr %u ms, scrptr %u ms, vio %u ms, ins %u ms, eloop %u ms, rebuild %u ms\n",
+        (unsigned int)(ps2_obj_prof_inner_create_us / 1000),
+        (unsigned int)(ps2_obj_prof_scrptr_us / 1000),
+        (unsigned int)(ps2_obj_prof_vio_us / 1000),
+        (unsigned int)(ps2_obj_prof_ins_us / 1000),
+        (unsigned int)(ps2_obj_prof_loop_us / 1000),
+        (unsigned int)(ps2_obj_prof_reb_us / 1000));
+    fflush(stdout);
+#endif
 
     fix_violence_level = -1;
 
@@ -466,6 +508,20 @@ static int obj_load_func(DB_FILE* stream)
     if (db_freadInt(stream, &objectCount) == -1) {
         return -1;
     }
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_obj_prof_count = 0;
+    ps2_obj_prof_read_us = 0;
+    ps2_obj_prof_inv_us = 0;
+    ps2_obj_prof_inv_items = 0;
+    ps2_obj_prof_lock_us = 0;
+    ps2_obj_prof_lock_calls = 0;
+    ps2_obj_prof_inner_create_us = 0;
+    ps2_obj_prof_scrptr_us = 0;
+    ps2_obj_prof_vio_us = 0;
+    ps2_obj_prof_ins_us = 0;
+    ps2_obj_prof_loop_us = 0;
+    ps2_obj_prof_reb_us = 0;
+#endif
 
     if (preload_list != NULL) {
         mem_free(preload_list);
@@ -479,6 +535,9 @@ static int obj_load_func(DB_FILE* stream)
         preload_list_index = 0;
     }
 
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_tloop = ps2_time_us();
+#endif
     for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
         int objectCountAtElevation;
         if (db_freadInt(stream, &objectCountAtElevation) == -1) {
@@ -488,6 +547,9 @@ static int obj_load_func(DB_FILE* stream)
         for (int objectIndex = 0; objectIndex < objectCountAtElevation; objectIndex++) {
             ObjectListNode* objectListNode;
 
+#ifdef PS2_DEV_SMOKE_TEST
+            uint64_t prof_tc = ps2_time_us();
+#endif
             // NOTE: Uninline.
             if (obj_create_object_node(&objectListNode) == -1) {
                 return -1;
@@ -498,7 +560,13 @@ static int obj_load_func(DB_FILE* stream)
                 obj_destroy_object_node(&objectListNode);
                 return -1;
             }
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_obj_prof_inner_create_us += ps2_time_us() - prof_tc;
+#endif
 
+#ifdef PS2_DEV_SMOKE_TEST
+            uint64_t prof_tr = ps2_time_us();
+#endif
             if (obj_read_obj(objectListNode->obj, stream) != 0) {
                 // NOTE: Uninline.
                 obj_destroy_object(&(objectListNode->obj));
@@ -508,11 +576,18 @@ static int obj_load_func(DB_FILE* stream)
 
                 return -1;
             }
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_obj_prof_read_us += ps2_time_us() - prof_tr;
+            ps2_obj_prof_count++;
+#endif
 
             objectListNode->obj->outline = 0;
             preload_list[preload_list_index++] = objectListNode->obj->fid;
 
             if (objectListNode->obj->sid != -1) {
+#ifdef PS2_DEV_SMOKE_TEST
+                uint64_t prof_ts = ps2_time_us();
+#endif
                 Script* script;
                 if (scr_ptr(objectListNode->obj->sid, &script) == -1) {
                     objectListNode->obj->sid = -1;
@@ -521,18 +596,34 @@ static int obj_load_func(DB_FILE* stream)
                     script->owner = objectListNode->obj;
                     objectListNode->obj->field_80 = script->scr_script_idx;
                 }
+#ifdef PS2_DEV_SMOKE_TEST
+                ps2_obj_prof_scrptr_us += ps2_time_us() - prof_ts;
+#endif
             }
 
+#ifdef PS2_DEV_SMOKE_TEST
+            uint64_t prof_tv = ps2_time_us();
+#endif
             obj_fix_violence_settings(&(objectListNode->obj->fid));
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_obj_prof_vio_us += ps2_time_us() - prof_tv;
+            uint64_t prof_tn = ps2_time_us();
+#endif
             objectListNode->obj->elevation = elevation;
 
             obj_insert(objectListNode);
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_obj_prof_ins_us += ps2_time_us() - prof_tn;
+#endif
 
             if ((objectListNode->obj->flags & OBJECT_NO_REMOVE) && PID_TYPE(objectListNode->obj->pid) == OBJ_TYPE_CRITTER && objectListNode->obj->pid != 18000) {
                 objectListNode->obj->flags &= ~OBJECT_NO_REMOVE;
             }
 
             Inventory* inventory = &(objectListNode->obj->data.inventory);
+#ifdef PS2_DEV_SMOKE_TEST
+            uint64_t prof_ti = ps2_time_us();
+#endif
             if (inventory->length != 0) {
                 inventory->items = (InventoryItem*)mem_malloc(sizeof(InventoryItem) * inventory->capacity);
                 if (inventory->items == NULL) {
@@ -567,10 +658,22 @@ static int obj_load_func(DB_FILE* stream)
                 inventory->capacity = 0;
                 inventory->items = NULL;
             }
+#ifdef PS2_DEV_SMOKE_TEST
+            ps2_obj_prof_inv_us += ps2_time_us() - prof_ti;
+            ps2_obj_prof_inv_items += inventory->length;
+#endif
         }
     }
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_obj_prof_loop_us += ps2_time_us() - prof_tloop;
+
+    uint64_t prof_treb = ps2_time_us();
+#endif
 
     obj_rebuild_all_light();
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_obj_prof_reb_us += ps2_time_us() - prof_treb;
+#endif
 
     return 0;
 }
@@ -3609,6 +3712,9 @@ static void obj_insert(ObjectListNode* objectListNode)
                 if ((obj->flags & OBJECT_FLAT) == (objectListNode->obj->flags & OBJECT_FLAT)) {
                     bool v11 = false;
                     CacheEntry* a2;
+#ifdef PS2_DEV_SMOKE_TEST
+                    uint64_t prof_tl = ps2_time_us();
+#endif
                     Art* v12 = art_ptr_lock(obj->fid, &a2);
                     if (v12 != NULL) {
 
@@ -3624,6 +3730,10 @@ static void obj_insert(ObjectListNode* objectListNode)
                             break;
                         }
                     }
+#ifdef PS2_DEV_SMOKE_TEST
+                    ps2_obj_prof_lock_us += ps2_time_us() - prof_tl;
+                    ps2_obj_prof_lock_calls++;
+#endif
                 }
             }
 

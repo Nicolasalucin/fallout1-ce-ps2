@@ -17,6 +17,10 @@
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
 
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
+
 namespace fallout {
 
 // The maximum number of opcodes.
@@ -151,6 +155,73 @@ static int cpuBurstSize = 10;
 
 // 0x59E230
 static OpcodeHandler* opTable[OPCODE_MAX_COUNT];
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load): interpreter cost breakdown. Opcode timings
+ * are sampled (1 of every 64 opcodes) to keep the instrumentation light. */
+static unsigned int ps2_int_prof_update_calls;
+static unsigned int ps2_int_prof_ops;
+static unsigned long long ps2_int_prof_interpret_us;
+static unsigned long long ps2_int_prof_doevents_us;
+static unsigned long long ps2_int_prof_intlib_us;
+static unsigned int ps2_int_prof_cond_calls;
+static unsigned int ps2_int_prof_timed_calls;
+static unsigned int ps2_int_prof_op_us[1024];
+static unsigned int ps2_int_prof_op_count[1024];
+static unsigned int ps2_int_prof_slow_idx[5];
+static unsigned int ps2_int_prof_slow_us[5];
+
+void ps2_int_prof_dump(void)
+{
+    printf("[ps2][smoke] prof: intrp: updates=%u ops=%u interpret=%u ms doEvents=%u ms intlib=%u ms cond=%u timed=%u\n",
+        ps2_int_prof_update_calls,
+        ps2_int_prof_ops,
+        (unsigned int)(ps2_int_prof_interpret_us / 1000),
+        (unsigned int)(ps2_int_prof_doevents_us / 1000),
+        (unsigned int)(ps2_int_prof_intlib_us / 1000),
+        ps2_int_prof_cond_calls,
+        ps2_int_prof_timed_calls);
+
+    for (int k = 0; k < 10; k++) {
+        int best = -1;
+        unsigned int bestUs = 0;
+        for (int i = 0; i < 1024; i++) {
+            if (ps2_int_prof_op_us[i] > bestUs) {
+                bestUs = ps2_int_prof_op_us[i];
+                best = i;
+            }
+        }
+        if (best == -1 || bestUs < 500) {
+            break;
+        }
+        printf("[ps2][smoke] prof: op[%03x] n=%u t=%u ms\n",
+            best,
+            ps2_int_prof_op_count[best],
+            bestUs / 1000);
+        ps2_int_prof_op_us[best] = 0;
+    }
+
+    for (int k = 0; k < 5; k++) {
+        if (ps2_int_prof_slow_us[k] != 0) {
+            printf("[ps2][smoke] prof: slow[%03x] %u us\n",
+                ps2_int_prof_slow_idx[k], ps2_int_prof_slow_us[k]);
+        }
+    }
+
+    fflush(stdout);
+    ps2_int_prof_update_calls = 0;
+    ps2_int_prof_ops = 0;
+    ps2_int_prof_interpret_us = 0;
+    ps2_int_prof_doevents_us = 0;
+    ps2_int_prof_intlib_us = 0;
+    ps2_int_prof_cond_calls = 0;
+    ps2_int_prof_timed_calls = 0;
+    memset(ps2_int_prof_op_us, 0, sizeof(ps2_int_prof_op_us));
+    memset(ps2_int_prof_op_count, 0, sizeof(ps2_int_prof_op_count));
+    memset(ps2_int_prof_slow_idx, 0, sizeof(ps2_int_prof_slow_idx));
+    memset(ps2_int_prof_slow_us, 0, sizeof(ps2_int_prof_slow_us));
+}
+#endif
 
 // 0x59E788
 static unsigned int suspendTime;
@@ -2633,7 +2704,29 @@ void interpret(Program* program, int a2)
             interpretError(err);
         }
 
+#ifdef PS2_DEV_SMOKE_TEST
+        uint64_t prof_t0 = ps2_time_us();
+#endif
         handler(program);
+#ifdef PS2_DEV_SMOKE_TEST
+        {
+            uint64_t prof_t1 = ps2_time_us();
+            unsigned int prof_dt = (unsigned int)(prof_t1 - prof_t0);
+            ps2_int_prof_op_us[opcodeIndex] += prof_dt;
+            ps2_int_prof_op_count[opcodeIndex]++;
+            ps2_int_prof_ops++;
+            if (prof_dt > ps2_int_prof_slow_us[4]) {
+                int pos = 4;
+                while (pos > 0 && ps2_int_prof_slow_us[pos - 1] < prof_dt) {
+                    ps2_int_prof_slow_us[pos] = ps2_int_prof_slow_us[pos - 1];
+                    ps2_int_prof_slow_idx[pos] = ps2_int_prof_slow_idx[pos - 1];
+                    pos--;
+                }
+                ps2_int_prof_slow_us[pos] = prof_dt;
+                ps2_int_prof_slow_idx[pos] = opcodeIndex;
+            }
+        }
+#endif
     }
 
     if ((program->flags & PROGRAM_FLAG_EXITED) != 0) {
@@ -2879,6 +2972,9 @@ static void doEvents()
 
                 programListNode->program->flags = 0;
                 programListNode->program->instructionPointer = fetchLong(procedurePtr, 12);
+#ifdef PS2_DEV_SMOKE_TEST
+                ps2_int_prof_cond_calls++;
+#endif
                 interpret(programListNode->program, -1);
 
                 if ((programListNode->program->flags & PROGRAM_FLAG_0x04) == 0) {
@@ -2899,6 +2995,9 @@ static void doEvents()
                 if ((unsigned int)fetchLong(procedurePtr, 8) < time) {
                     // NOTE: Uninline.
                     storeLong(0, procedurePtr, 4);
+#ifdef PS2_DEV_SMOKE_TEST
+                    ps2_int_prof_timed_calls++;
+#endif
                     executeProc(programListNode->program, procedureIndex);
                 }
             }
@@ -2981,6 +3080,9 @@ void interpretSetCPUBurstSize(int value)
 // 0x461F28
 void updatePrograms()
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t prof_t_it = ps2_time_us();
+#endif
     ProgramListNode* curr = head;
     while (curr != NULL) {
         ProgramListNode* next = curr->next;
@@ -2992,8 +3094,20 @@ void updatePrograms()
         }
         curr = next;
     }
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_int_prof_interpret_us += ps2_time_us() - prof_t_it;
+    uint64_t prof_t_de = ps2_time_us();
+#endif
     doEvents();
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_int_prof_doevents_us += ps2_time_us() - prof_t_de;
+    uint64_t prof_t_il = ps2_time_us();
+#endif
     updateIntLib();
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_int_prof_intlib_us += ps2_time_us() - prof_t_il;
+    ps2_int_prof_update_calls++;
+#endif
 }
 
 // 0x461F74

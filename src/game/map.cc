@@ -32,6 +32,9 @@
 #include "game/tile.h"
 #include "game/worldmap.h"
 #include "platform_compat.h"
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
 #include "plib/color/color.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
@@ -42,6 +45,33 @@
 #include "plib/gnw/svga.h"
 
 namespace fallout {
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* TEMP profiling (F5.2 map load): print the time spent in the segment that
+ * just ended, then restart the baseline. The first call only starts it.
+ * Smoke builds only; see also ps2_smoke.cc and the ps2_fs_stat_* counters. */
+static uint64_t s_prof_last_us;
+
+static void ps2_prof_mark(const char* name)
+{
+    uint64_t now = ps2_time_us();
+    if (s_prof_last_us != 0) {
+        printf("[ps2][smoke] prof: %-24s %u ms\n", name,
+            (unsigned int)((now - s_prof_last_us) / 1000));
+        fflush(stdout);
+    }
+    s_prof_last_us = now;
+}
+/* Implemented in memory.cc / scripts.cc / intrpret.cc / art.cc (smoke builds). */
+void ps2_mem_stat_reset(void);
+void ps2_mem_stat_dump(const char* tag);
+void ps2_scr_prof_dump(void);
+void ps2_int_prof_dump(void);
+void ps2_art_prof_dump(void);
+#define PS2_PROF(name) ps2_prof_mark(name)
+#else
+#define PS2_PROF(name) ((void)0)
+#endif
 
 static int map_age_dead_critters();
 static void map_match_map_number();
@@ -860,6 +890,13 @@ int map_load(char* file_name)
     char* file_path;
 
     compat_strupr(file_name);
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_mem_stat_reset();
+    ps2_scr_prof_dump();
+    ps2_int_prof_dump();
+    ps2_art_prof_dump();
+#endif
+    PS2_PROF("ml-entry");
 
     rc = -1;
 
@@ -872,6 +909,7 @@ int map_load(char* file_name)
         stream = db_fopen(file_path, "rb");
         strcpy(extension, ".MAP");
         db_fclose(stream);
+        PS2_PROF("sav-probe");
 
         if (stream != NULL) {
             rc = map_load_in_game(file_name);
@@ -882,6 +920,7 @@ int map_load(char* file_name)
     if (rc == -1) {
         file_path = map_file_path(file_name);
         stream = db_fopen(file_path, "rb");
+        PS2_PROF("map-open");
         if (stream != NULL) {
             rc = map_load_file(stream);
             db_fclose(stream);
@@ -922,12 +961,21 @@ int map_load_file(DB_FILE* stream)
     const char* error;
 
     map_save_in_game(true);
+    PS2_PROF("save-in-game");
     gsound_background_play("wind2", 12, 13, 16);
     map_disable_bk_processes();
     partyMemberPrepLoad();
     gmouse_disable_scrolling();
     gmouse_set_cursor(MOUSE_CURSOR_WAIT_PLANET);
+#ifdef __PS2__
+    // PS2 port: this callback presents a full vsync-locked frame (see
+    // ps2_video_present), so the desktop-oriented 8 KiB cadence turns a map
+    // load into hundreds of frame presents (one per art file read, etc.),
+    // dominating load time. Refresh the loading screen every 128 KiB.
+    db_register_callback(gameMouseRefreshImmediately, 131072);
+#else
     db_register_callback(gameMouseRefreshImmediately, 8192);
+#endif
     tile_disable_refresh();
     anim_stop();
     scr_disable();
@@ -940,6 +988,7 @@ int map_load_file(DB_FILE* stream)
 
         error = "Error reading header";
         if (map_read_MapData(&map_data, stream) != 0) break;
+        PS2_PROF("read-MapData");
 
         error = "Invalid map version";
         if (map_data.version != 19) break;
@@ -961,6 +1010,7 @@ int map_load_file(DB_FILE* stream)
         error = "Error loading global vars";
         // NOTE: Uninline.
         if (map_load_global_vars(stream) != 0) break;
+        PS2_PROF("global-vars");
 
         error = "Error allocating local vars";
         // NOTE: Uninline.
@@ -968,18 +1018,23 @@ int map_load_file(DB_FILE* stream)
 
         error = "Error loading local vars";
         if (map_load_local_vars(stream) != 0) break;
+        PS2_PROF("local-vars");
 
         if (square_load(stream, map_data.flags) != 0) break;
+        PS2_PROF("square-load");
 
         error = "Error reading scripts";
         if (scr_load(stream) != 0) break;
+        PS2_PROF("scr-load");
 
         error = "Error reading objects";
         if (obj_load(stream) != 0) break;
+        PS2_PROF("obj-load");
 
         if ((map_data.flags & 1) == 0) {
             map_fix_critter_combat_data();
         }
+        PS2_PROF("critter-fix");
 
         error = "Error setting map elevation";
         if (map_set_elevation(map_data.enteringElevation) != 0) break;
@@ -991,6 +1046,7 @@ int map_load_file(DB_FILE* stream)
         obj_move_to_tile(obj_dude, tile_center_tile, map_elevation, NULL);
         obj_set_rotation(obj_dude, map_data.enteringRotation, NULL);
         map_match_map_number();
+        PS2_PROF("place-dude");
 
         if ((map_data.flags & 1) == 0) {
             char path[COMPAT_MAX_PATH];
@@ -1009,6 +1065,7 @@ int map_load_file(DB_FILE* stream)
             game_load_info_vars(path, "MAP_GLOBAL_VARS:", &num_map_global_vars, &map_global_vars);
             map_data.globalVariablesCount = num_map_global_vars;
         }
+        PS2_PROF("gam-vars");
 
         scr_enable();
 
@@ -1035,6 +1092,7 @@ int map_load_file(DB_FILE* stream)
             exec_script_proc(map_script_id, SCRIPT_PROC_MAP_ENTER);
             scr_spatials_enable();
         }
+        PS2_PROF("map-script-enter");
 
         error = NULL;
     } while (0);
@@ -1048,6 +1106,7 @@ int map_load_file(DB_FILE* stream)
     } else {
         obj_preload_art_cache(map_data.flags);
     }
+    PS2_PROF("art-cache");
 
     partyMemberRecoverLoad();
     intface_show();
@@ -1055,14 +1114,17 @@ int map_load_file(DB_FILE* stream)
     map_enable_bk_processes();
     gmouse_disable_scrolling();
     gmouse_set_cursor(MOUSE_CURSOR_WAIT_PLANET);
+    PS2_PROF("post-setup");
 
     if (scr_load_all_scripts() == -1) {
         debug_printf("\n   Error: scr_load_all_scripts failed!");
     }
+    PS2_PROF("scr-load-all");
 
     scr_exec_map_enter_scripts();
     scr_exec_map_update_scripts();
     tile_enable_refresh();
+    PS2_PROF("scr-exec");
 
     if (map_state.map > 0) {
         if (map_state.rotation >= 0) {
@@ -1076,6 +1138,13 @@ int map_load_file(DB_FILE* stream)
     db_register_callback(NULL, 0);
     gmouse_enable_scrolling();
     gmouse_set_cursor(MOUSE_CURSOR_NONE);
+    PS2_PROF("end");
+#ifdef PS2_DEV_SMOKE_TEST
+    ps2_mem_stat_dump("load");
+    ps2_scr_prof_dump();
+    ps2_int_prof_dump();
+    ps2_art_prof_dump();
+#endif
 
     return rc;
 }
