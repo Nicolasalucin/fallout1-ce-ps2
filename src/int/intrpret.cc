@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -422,7 +423,11 @@ void interpretFreeProgram(Program* program)
     delete program->stackValues;
     delete program->returnStackValues;
 
+#ifdef __PS2__
+    myfree(program->rawAllocation, __FILE__, __LINE__); // "..\int\INTRPRET.C", 377
+#else
     myfree(program, __FILE__, __LINE__); // "..\int\INTRPRET.C", 377
+#endif
 }
 
 // 0x45BA44
@@ -442,8 +447,21 @@ Program* allocateProgram(const char* path)
     db_fread(data, 1, fileSize, stream);
     db_fclose(stream);
 
+#ifdef __PS2__
+    // NOTE (PS2 port): `Program` contains a 16-byte aligned `jmp_buf` (see
+    // the struct declaration in intrpret.h); the engine allocator only
+    // guarantees 8-byte alignment, so over-allocate and align the block up,
+    // remembering the original pointer for `interpretFreeProgram`.
+    void* rawAllocation = mymalloc(sizeof(Program) + 16, __FILE__, __LINE__); // ..\int\INTRPRET.C, 402
+    Program* program = (Program*)(((uintptr_t)rawAllocation + 15) & ~(uintptr_t)15);
+#else
     Program* program = (Program*)mymalloc(sizeof(Program), __FILE__, __LINE__); // ..\int\INTRPRET.C, 402
+#endif
     memset(program, 0, sizeof(Program));
+
+#ifdef __PS2__
+    program->rawAllocation = rawAllocation;
+#endif
 
     program->name = (char*)mymalloc(strlen(path) + 1, __FILE__, __LINE__); // ..\int\INTRPRET.C, 405
     strcpy(program->name, path);
@@ -2595,7 +2613,9 @@ void interpret(Program* program, int a2)
         }
 
         // NOTE: Uninline.
-        opcode_t opcode = getOp(program);
+        opcode_t opcode;
+
+        opcode = getOp(program);
 
         // TODO: Replace with field_82 and field_80?
         program->flags &= 0xFFFF;
@@ -2777,7 +2797,14 @@ void executeProcedure(Program* program, int procedureIndex)
     int externalProcedureArgumentCount;
     int procedureFlags;
     char err[256];
+#ifdef __PS2__
+    // NOTE (PS2 port): keep the snapshot block 16-byte aligned (see the
+    // `Program` env member in intrpret.h - R5900 `lq`/`sq` mask the low 4
+    // address bits).
+    jmp_buf env __attribute__((aligned(16)));
+#else
     jmp_buf env;
+#endif
 
     procedurePtr = program->procedures + 4 + sizeof(Procedure) * procedureIndex;
     procedureFlags = fetchLong(procedurePtr, 4);
@@ -2823,7 +2850,14 @@ static void doEvents()
     int oldProgramFlags;
     int oldInstructionPointer;
     int data;
+#ifdef __PS2__
+    // NOTE (PS2 port): keep the snapshot block 16-byte aligned (see the
+    // `Program` env member in intrpret.h - R5900 `lq`/`sq` mask the low 4
+    // address bits).
+    jmp_buf env __attribute__((aligned(16)));
+#else
     jmp_buf env;
+#endif
 
     if (suspendEvents) {
         return;

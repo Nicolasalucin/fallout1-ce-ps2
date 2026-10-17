@@ -30,6 +30,7 @@
 #include "game/options.h"
 #include "game/palette.h"
 #include "game/proto.h"
+#include "game/ps2_smoke.h"
 #include "game/roll.h"
 #include "game/scripts.h"
 #include "game/select.h"
@@ -95,6 +96,12 @@ int gnw_main(int argc, char** argv)
     if (!main_init_system(argc, argv)) {
         return 1;
     }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    // Dev-only automated smoke test harness (see src/game/ps2_smoke.cc):
+    // replaces the intro movies and the main menu with a scripted sequence.
+    return ps2_smoke_main();
+#endif
 
     gmovie_play(MOVIE_IPLOGO, GAME_MOVIE_FADE_IN);
     gmovie_play(MOVIE_INTRO, 0);

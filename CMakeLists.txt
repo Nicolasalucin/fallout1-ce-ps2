@@ -35,6 +35,12 @@ if(PS2_BUILD)
     set(PS2 TRUE)
 endif()
 
+# Dev-only: compile the automated smoke-test harness (src/game/ps2_smoke.cc).
+# Driven by tools/run_smoke.sh: after engine init it takes over the game flow,
+# boots straight into a map with a premade character and logs a
+# SUITE_FINISHED_* verdict to the emulator console.
+option(PS2_DEV_SMOKE_TEST "Compile the PS2 automated smoke-test harness (dev only)" OFF)
+
 if (ANDROID)
     add_library(${EXECUTABLE_NAME} SHARED)
 else()
@@ -295,7 +301,8 @@ endif()
 
 if(PS2)
     # Native PlayStation 2 platform layer (C99) + two C++ shims (entry point
-    # and the SDL2-subset implementation).
+    # and the SDL2-subset implementation). The F5 audio worker streams mixed
+    # PCM to the SPU2 through audsrv.
     target_sources(${EXECUTABLE_NAME} PRIVATE
         "src/platform/ps2/main.cc"
         "src/platform/ps2/boot.c"
@@ -303,8 +310,42 @@ if(PS2)
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
         "src/platform/ps2/fs.c"
+        "src/platform/ps2/audio_audsrv.c"
         "src/platform/ps2/platform_compat_ps2.cc"
         "src/platform/ps2/sdl/sdl_shim.c"
+    )
+
+    # Automated smoke-test harness (dev only, see tools/run_smoke.sh).
+    if(PS2_DEV_SMOKE_TEST)
+        message(STATUS "PS2 smoke-test harness enabled (PS2_DEV_SMOKE_TEST=ON)")
+        target_sources(${EXECUTABLE_NAME} PRIVATE
+            "src/game/ps2_smoke.cc"
+            "src/game/ps2_smoke.h"
+        )
+        target_compile_definitions(${EXECUTABLE_NAME} PRIVATE PS2_DEV_SMOKE_TEST=1)
+    endif()
+
+    # audsrv.irx (ps2sdk, BSD/AFL-2.0) is embedded into the ELF; on a real
+    # PS2 that embedded copy is the module that actually gets used, so no
+    # loose files need to ship next to the game data.
+    file(READ "${PS2SDK}/iop/irx/audsrv.irx" _ps2_audsrv_irx_hex HEX)
+    string(REGEX REPLACE "(..)" "0x\\1," _ps2_audsrv_irx_bytes "${_ps2_audsrv_irx_hex}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/audsrv_irx_data.c"
+        "/* Generated from ps2sdk audsrv.irx - do not edit. */\n"
+        "const unsigned char g_audsrv_irx[] = { ${_ps2_audsrv_irx_bytes} 0x00 };\n"
+        "const unsigned int g_audsrv_irx_size = sizeof(g_audsrv_irx) - 1;\n")
+    target_sources(${EXECUTABLE_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/audsrv_irx_data.c")
+
+    # The same module is also dropped next to the ELF. Under PCSX2 the
+    # EE->IOP DMA route of SifExecModuleBuffer is broken by the IOP HLE (the
+    # module loads on paper but never runs), and SifLoadModule of this file
+    # is the only working route there; PCSX2 resolves "host:" to the ELF's
+    # directory. See src/platform/ps2/audio_audsrv.c.
+    add_custom_command(TARGET ${EXECUTABLE_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PS2SDK}/iop/irx/audsrv.irx"
+                "${CMAKE_CURRENT_BINARY_DIR}/audsrv.irx"
+        COMMENT "Copying audsrv.irx next to the game ELF (PCSX2 host: root)"
     )
 
     # The SDL2-subset shim (src/platform/ps2/sdl/SDL.h) must win over any
@@ -336,18 +377,20 @@ if(PS2)
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
         src/platform/ps2/fs.c
+        src/platform/ps2/audio_audsrv.c
         src/platform/ps2/platform_compat_ps2.cc
         src/platform/ps2/sdl/sdl_shim.c
         PROPERTIES COMPILE_OPTIONS "-fsingle-precision-constant;-Wno-cast-align"
     )
 
     # Platform libraries: gsKit (+ DMA/kit utilities), GS graph primitives,
-    # libpad for DualShock 2 input.
+    # libpad for DualShock 2 input, libaudsrv for SPU2 streaming.
     target_link_libraries(${EXECUTABLE_NAME}
         gskit
         dmakit
         graph
         pad
+        audsrv
         m
     )
 

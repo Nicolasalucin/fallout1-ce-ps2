@@ -15,8 +15,10 @@
  *     directly to the video backend (gsKit, GS_PSM_T8 + GS_PSM_CT32).
  *   - The event queue, mouse state and timers are driven by the input layer
  *     (input_pad.c) and pumped from SDL_PollEvent/SDL_PumpEvents.
- *   - Audio entry points are stubs in F1; the real implementation feeds ACM
- *     decoded PCM into audsrv (F5).
+ *   - Audio (F5): the device callback runs on a dedicated EE thread
+ *     (ps2_audio.h / audio_audsrv.c) that streams mixed PCM to the SPU2 via
+ *     audsrv. SDL_AudioStream performs the sample/rate/channel conversion
+ *     SDL would do, so the engine's mixing code stays untouched.
  *
  * There is no SDL library linked: these symbols ARE the implementation.
  */
@@ -25,13 +27,19 @@
 #include "ps2_sdl_internal.h"
 
 #include <ctype.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <delaythread.h>
+
+#include "ps2_audio.h"
 #include "ps2_input.h"
 #include "ps2_time.h"
 #include "ps2_video.h"
+
+#include "game/ps2_smoke.h"
 
 /* ---------------------------------------------------------------------- */
 /* Subsystem init state                                                    */
@@ -74,9 +82,18 @@ Uint32 SDL_GetTicks(void)
 
 void SDL_Delay(Uint32 ms)
 {
-    uint64_t target = ps2_time_us() + (uint64_t)ms * 1000;
+    uint64_t target = ps2_time_us() + (uint64_t)(ms != 0 ? ms : 1) * 1000;
+
+    /* PS2 (EE): sleep the thread, never busy-spin. The kernel schedules
+     * strictly by priority and does not preempt a spinning thread, so a
+     * spin here starves every peer thread - in particular the audio worker,
+     * which is the only thing that advances the engine's sound cursors.
+     * The MVE player waits on those cursors, so a spin here deadlocks the
+     * whole console as soon as the first movie frame with audio is shown.
+     * Yielding every millisecond keeps frame pacing accurate and the audio
+     * thread alive. */
     while (ps2_time_us() < target) {
-        /* spin on the cycle counter; used only for frame pacing/idle */
+        DelayThread(1000);
     }
 }
 
@@ -112,11 +129,50 @@ struct SDL_AudioStream {
     Uint16 dst_format;
     Uint8 dst_channels;
     int dst_rate;
+
+    /* Input ring holding raw source bytes; conversion happens on demand in
+     * SDL_AudioStreamGet, mirroring SDL's lazy conversion. */
+    unsigned char* input;
+    int input_capacity;
+    int input_head; /* byte offset of the first valid byte */
+    int input_len; /* number of valid bytes */
+
+    /* 16.16 fixed point index (in source frames) of the next output frame. */
+    int src_pos;
+    int rate_step; /* (src_rate << 16) / dst_rate */
+
+    int src_frame_bytes;
+    int dst_frame_bytes;
+    int passthrough;
 };
 
 /* ---------------------------------------------------------------------- */
 /* Surfaces                                                                */
 /* ---------------------------------------------------------------------- */
+
+/*
+ * Palettes are reference counted because the engine shares one palette
+ * object between the screen surface and the movie surfaces
+ * (SDL_SetSurfacePalette in movie playback). Freeing a surface must only
+ * drop its reference, never release a palette still owned by another
+ * surface: doing so used to free the screen palette and every later
+ * SDL_SetPaletteColors wrote into recycled heap memory.
+ */
+static void palette_release(SDL_Palette* palette)
+{
+    if (palette == NULL) {
+        return;
+    }
+
+    if (palette->refcount > 0) {
+        palette->refcount--;
+    }
+
+    if (palette->refcount == 0) {
+        free(palette->colors);
+        free(palette);
+    }
+}
 
 static void surface_destroy(SDL_Surface* surface)
 {
@@ -125,16 +181,24 @@ static void surface_destroy(SDL_Surface* surface)
     }
 
     if (surface->format != NULL) {
-        SDL_Palette* palette = surface->format->palette;
-        if (palette != NULL) {
-            free(palette->colors);
-            free(palette);
-        }
+        palette_release(surface->format->palette);
         free(surface->format);
     }
 
     free(surface->pixels);
     free(surface);
+}
+
+/* Pixel buffers end up as GS DMA sources (T8 texture upload): keep them
+ * 64-byte (cache line) aligned and zeroed like calloc. memalign memory is
+ * free()-compatible on ps2sdk (gsKit relies on this too). */
+static void* pixels_alloc(size_t size)
+{
+    void* pixels = memalign(64, size);
+    if (pixels != NULL) {
+        memset(pixels, 0, size);
+    }
+    return pixels;
 }
 
 static SDL_Surface* surface_create(int width, int height, int depth)
@@ -158,7 +222,7 @@ static SDL_Surface* surface_create(int width, int height, int depth)
 
     if (depth == 8) {
         surface->pitch = width;
-        surface->pixels = calloc(1, (size_t)width * height);
+        surface->pixels = pixels_alloc((size_t)width * height);
 
         format->BitsPerPixel = 8;
         format->BytesPerPixel = 1;
@@ -176,7 +240,7 @@ static SDL_Surface* surface_create(int width, int height, int depth)
             bytes_per_pixel = 1;
         }
         surface->pitch = width * bytes_per_pixel;
-        surface->pixels = calloc(1, (size_t)surface->pitch * height);
+        surface->pixels = pixels_alloc((size_t)surface->pitch * height);
         format->BitsPerPixel = (Uint8)depth;
         format->BytesPerPixel = (Uint8)bytes_per_pixel;
     }
@@ -355,7 +419,17 @@ int SDL_SetSurfacePalette(SDL_Surface* surface, SDL_Palette* palette)
         return -1;
     }
 
+    if (surface->format->palette == palette) {
+        return 0;
+    }
+
+    palette_release(surface->format->palette);
+
     surface->format->palette = palette;
+    if (palette != NULL) {
+        palette->refcount++;
+    }
+
     return 0;
 }
 
@@ -472,6 +546,7 @@ int SDL_UpdateTexture(SDL_Texture* texture, const SDL_Rect* rect, const void* pi
     texture->pixels = pixels;
     texture->pitch = pitch;
     s_last_texture = texture;
+
     return 0;
 }
 
@@ -509,6 +584,12 @@ void SDL_RenderPresent(SDL_Renderer* renderer)
     if (s_last_texture != NULL && s_last_texture->pixels != NULL) {
         ps2_video_present(s_last_texture->pixels, s_last_texture->w, s_last_texture->h, s_last_texture->pitch);
     }
+
+    /* Stream finished audio chunks to audsrv from this (engine) thread; the
+     * mixer runs on its own thread and never touches the SIF (see
+     * ps2_audio.h). Doing it here guarantees a feed even on frames where
+     * the engine skips the event pump. */
+    ps2_audio_pump();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -612,8 +693,23 @@ void ps2_sdl_post_mouse_move(int dx, int dy)
 
     s_mouse_xrel += dx;
     s_mouse_yrel += dy;
+
+    /* Keep the absolute cursor inside the game's 640x480 surface. The
+     * engine consumes relative deltas and clips its own cursor, so only
+     * the absolute state (event coordinates, SDL_GetMouseState-style
+     * readers) is bounded here; the deltas pass through unchanged. */
     s_mouse_x += dx;
     s_mouse_y += dy;
+    if (s_mouse_x < 0) {
+        s_mouse_x = 0;
+    } else if (s_mouse_x > 639) {
+        s_mouse_x = 639;
+    }
+    if (s_mouse_y < 0) {
+        s_mouse_y = 0;
+    } else if (s_mouse_y > 479) {
+        s_mouse_y = 479;
+    }
 
     SDL_Event e;
     memset(&e, 0, sizeof(e));
@@ -642,6 +738,8 @@ void ps2_sdl_post_mouse_button(int sdl_button, int down)
     e.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
     e.button.button = (Uint8)sdl_button;
     e.button.state = down ? SDL_PRESSED : SDL_RELEASED;
+    e.button.x = s_mouse_x;
+    e.button.y = s_mouse_y;
     ps2_sdl_push_event(&e);
 }
 
@@ -800,6 +898,11 @@ static void sdl_pump(void)
     }
 
     ps2_input_poll();
+#ifdef PS2_DEV_SMOKE_TEST
+    /* Dev-only automated smoke test harness (see game/ps2_smoke.cc). */
+    ps2_smoke_tick();
+#endif
+    ps2_audio_pump();
     pump_timers();
 }
 
@@ -958,69 +1061,366 @@ void SDL_ShowSimpleMessageBox(Uint32 flags, const char* title, const char* messa
 }
 
 /* ---------------------------------------------------------------------- */
-/* Audio (F1 stubs; audsrv streaming implementation lands in F5)           */
+/* Audio (F5): audsrv PCM device + SDL_AudioStream conversion              */
 /* ---------------------------------------------------------------------- */
+
+#define PS2_SDL_AUDIO_DEVICE_ID 1
+
+static int s_audio_device_open;
+static SDL_AudioCallback s_audio_device_callback;
+static void* s_audio_device_userdata;
+
+static void ps2_sdl_audio_mix(void* userdata, unsigned char* stream, int len)
+{
+    (void)userdata;
+
+    if (s_audio_device_callback != NULL) {
+        s_audio_device_callback(s_audio_device_userdata, stream, len);
+    }
+}
 
 SDL_AudioDeviceID SDL_OpenAudioDevice(const char* device, int iscapture, const SDL_AudioSpec* desired, SDL_AudioSpec* obtained, int allowed_changes)
 {
+    int freq = 0;
+
     (void)device;
-    (void)iscapture;
     (void)allowed_changes;
 
-    if (desired == NULL) {
-        return 0;
+    if (desired == NULL || desired->callback == NULL || desired->freq <= 0 || iscapture != 0) {
+        return (SDL_AudioDeviceID)-1;
     }
+
+    /* The engine follows up with PauseAudioDevice(dev, 0) to start playback. */
+    if (ps2_audio_open(desired->freq, desired->samples, ps2_sdl_audio_mix, NULL, &freq) != 0) {
+        /* No audsrv/IOP audio available. Return -1 (what audioEngineInit
+         * checks) so the engine disables sound instead of hanging on a
+         * callback that would never run. */
+        return (SDL_AudioDeviceID)-1;
+    }
+
+    s_audio_device_open = 1;
+    s_audio_device_callback = desired->callback;
+    s_audio_device_userdata = desired->userdata;
 
     if (obtained != NULL) {
-        *obtained = *desired;
+        memset(obtained, 0, sizeof(*obtained));
+        obtained->freq = freq;
+        obtained->format = AUDIO_S16SYS;
+        obtained->channels = 2;
+        obtained->silence = 0;
+        obtained->samples = desired->samples;
+        obtained->callback = desired->callback;
+        obtained->userdata = desired->userdata;
     }
 
-    return 1;
+    return PS2_SDL_AUDIO_DEVICE_ID;
 }
 
 void SDL_CloseAudioDevice(SDL_AudioDeviceID dev)
 {
-    (void)dev;
+    if (dev != PS2_SDL_AUDIO_DEVICE_ID || !s_audio_device_open) {
+        return;
+    }
+
+    s_audio_device_open = 0;
+    s_audio_device_callback = NULL;
+    s_audio_device_userdata = NULL;
+
+    ps2_audio_close();
 }
 
 void SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
 {
-    (void)dev;
-    (void)pause_on;
+    if (dev != PS2_SDL_AUDIO_DEVICE_ID || !s_audio_device_open) {
+        return;
+    }
+
+    ps2_audio_pause(pause_on);
+}
+
+/* ---- SDL_AudioStream conversion ---------------------------------------- */
+
+static int audio_format_bytes(Uint16 format)
+{
+    if (format == AUDIO_S8 || format == AUDIO_U8) {
+        return 1;
+    }
+
+    return 2;
+}
+
+static int audio_sample_to_s16(const unsigned char* sample, Uint16 format)
+{
+    if (format == AUDIO_S8) {
+        return (int)(Sint8)sample[0] << 8;
+    }
+
+    if (format == AUDIO_U8) {
+        return ((int)sample[0] - 128) << 8;
+    }
+
+    return (int)(Sint16)(sample[0] | ((int)sample[1] << 8));
+}
+
+static void audio_ring_read(const SDL_AudioStream* stream, int offset, unsigned char* dst, int count)
+{
+    int start = (stream->input_head + offset) % stream->input_capacity;
+    int first = stream->input_capacity - start;
+
+    if (first >= count) {
+        memcpy(dst, stream->input + start, (size_t)count);
+    } else {
+        memcpy(dst, stream->input + start, (size_t)first);
+        memcpy(dst + first, stream->input, (size_t)(count - first));
+    }
+}
+
+static void audio_stream_read_frame(const SDL_AudioStream* stream, int frame_index, int channels[2])
+{
+    unsigned char frame[8];
+    int sample_bytes = audio_format_bytes(stream->src_format);
+
+    audio_ring_read(stream, frame_index * stream->src_frame_bytes, frame, stream->src_frame_bytes);
+
+    if (stream->src_channels == 1) {
+        channels[0] = audio_sample_to_s16(frame, stream->src_format);
+        channels[1] = channels[0];
+    } else {
+        channels[0] = audio_sample_to_s16(frame, stream->src_format);
+        channels[1] = audio_sample_to_s16(frame + sample_bytes, stream->src_format);
+    }
+}
+
+static int audio_stream_write_frame(unsigned char* dst, const SDL_AudioStream* stream, int left, int right)
+{
+    if (stream->dst_format == AUDIO_S16LSB) {
+        if (stream->dst_channels == 1) {
+            int value = (left + right) / 2;
+
+            if (value > 32767) {
+                value = 32767;
+            } else if (value < -32768) {
+                value = -32768;
+            }
+
+            dst[0] = (unsigned char)(value & 0xFF);
+            dst[1] = (unsigned char)((value >> 8) & 0xFF);
+            return 2;
+        }
+
+        dst[0] = (unsigned char)(left & 0xFF);
+        dst[1] = (unsigned char)((left >> 8) & 0xFF);
+        dst[2] = (unsigned char)(right & 0xFF);
+        dst[3] = (unsigned char)((right >> 8) & 0xFF);
+        return 4;
+    }
+
+    /* Defensive fallbacks (the device format is always S16). */
+    {
+        int value = (left + right) / 2;
+
+        if (stream->dst_format == AUDIO_U8) {
+            value = ((value >> 8) + 128);
+            if (value < 0) {
+                value = 0;
+            } else if (value > 255) {
+                value = 255;
+            }
+            dst[0] = (unsigned char)value;
+            return 1;
+        }
+
+        value >>= 8;
+        if (value > 127) {
+            value = 127;
+        } else if (value < -128) {
+            value = -128;
+        }
+        dst[0] = (unsigned char)value;
+        return 1;
+    }
 }
 
 SDL_AudioStream* SDL_NewAudioStream(Uint16 src_format, Uint8 src_channels, int src_rate, Uint16 dst_format, Uint8 dst_channels, int dst_rate)
 {
     SDL_AudioStream* stream = (SDL_AudioStream*)calloc(1, sizeof(SDL_AudioStream));
-    if (stream != NULL) {
-        stream->src_format = src_format;
-        stream->src_channels = src_channels;
-        stream->src_rate = src_rate;
-        stream->dst_format = dst_format;
-        stream->dst_channels = dst_channels;
-        stream->dst_rate = dst_rate;
+    if (stream == NULL) {
+        return NULL;
     }
+
+    stream->src_format = src_format;
+    stream->src_channels = src_channels > 0 ? src_channels : 1;
+    stream->src_rate = src_rate;
+    stream->dst_format = dst_format;
+    stream->dst_channels = dst_channels > 0 ? dst_channels : 1;
+    stream->dst_rate = dst_rate;
+
+    stream->input_capacity = 8192;
+    stream->input = (unsigned char*)malloc((size_t)stream->input_capacity);
+    if (stream->input == NULL) {
+        free(stream);
+        return NULL;
+    }
+
+    stream->src_frame_bytes = audio_format_bytes(src_format) * stream->src_channels;
+    stream->dst_frame_bytes = audio_format_bytes(dst_format) * stream->dst_channels;
+
+    stream->rate_step = (src_rate > 0 && dst_rate > 0)
+        ? (int)(((unsigned long long)src_rate << 16) / (unsigned int)dst_rate)
+        : (1 << 16);
+    if (stream->rate_step <= 0) {
+        stream->rate_step = 1 << 16;
+    }
+
+    stream->passthrough = src_format == dst_format
+        && src_channels == dst_channels
+        && src_rate == dst_rate;
+
     return stream;
 }
 
 int SDL_AudioStreamPut(SDL_AudioStream* stream, const void* buf, int len)
 {
-    (void)stream;
-    (void)buf;
-    (void)len;
+    const unsigned char* src = (const unsigned char*)buf;
+    int space;
+
+    if (stream == NULL || buf == NULL || len < 0) {
+        return -1;
+    }
+
+    if (len == 0) {
+        return 0;
+    }
+
+    if (len > stream->input_capacity) {
+        src += len - stream->input_capacity;
+        len = stream->input_capacity;
+    }
+
+    space = stream->input_capacity - stream->input_len;
+
+    while (space < len) {
+        /* Ring full (should not happen with the engine's put/get rhythm):
+         * drop the oldest frame to make room. */
+        int drop_frames = 1;
+        int drop_bytes = drop_frames * stream->src_frame_bytes;
+
+        stream->input_head = (stream->input_head + drop_bytes) % stream->input_capacity;
+        stream->input_len -= drop_bytes;
+
+        if (stream->src_pos >= (drop_frames << 16)) {
+            stream->src_pos -= drop_frames << 16;
+        } else {
+            stream->src_pos = 0;
+        }
+
+        space = stream->input_capacity - stream->input_len;
+    }
+
+    {
+        int tail = (stream->input_head + stream->input_len) % stream->input_capacity;
+        int first = stream->input_capacity - tail;
+
+        if (first >= len) {
+            memcpy(stream->input + tail, src, (size_t)len);
+        } else {
+            memcpy(stream->input + tail, src, (size_t)first);
+            memcpy(stream->input, src + first, (size_t)(len - first));
+        }
+
+        stream->input_len += len;
+    }
+
     return 0;
 }
 
 int SDL_AudioStreamGet(SDL_AudioStream* stream, void* buf, int len)
 {
-    (void)stream;
-    (void)buf;
-    (void)len;
-    return 0;
+    unsigned char* out = (unsigned char*)buf;
+    int written = 0;
+
+    if (stream == NULL || buf == NULL || len < 0) {
+        return -1;
+    }
+
+    if (len == 0) {
+        return 0;
+    }
+
+    if (stream->passthrough) {
+        int count = stream->input_len < len ? stream->input_len : len;
+
+        if (count > 0) {
+            audio_ring_read(stream, 0, out, count);
+            stream->input_head = (stream->input_head + count) % stream->input_capacity;
+            stream->input_len -= count;
+        }
+
+        return count;
+    }
+
+    while (written + stream->dst_frame_bytes <= len) {
+        int in_frames = stream->input_len / stream->src_frame_bytes;
+        int base = stream->src_pos >> 16;
+        int frac = stream->src_pos & 0xFFFF;
+        int current[2];
+        int left;
+        int right;
+
+        if (base >= in_frames) {
+            break;
+        }
+
+        if (frac != 0 && base + 1 >= in_frames) {
+            /* Wait for the next input frame to interpolate against. */
+            break;
+        }
+
+        audio_stream_read_frame(stream, base, current);
+
+        if (frac == 0) {
+            left = current[0];
+            right = current[1];
+        } else {
+            int next[2];
+
+            audio_stream_read_frame(stream, base + 1, next);
+            left = current[0] + (int)(((next[0] - current[0]) * frac) >> 16);
+            right = current[1] + (int)(((next[1] - current[1]) * frac) >> 16);
+        }
+
+        written += audio_stream_write_frame(out + written, stream, left, right);
+        stream->src_pos += stream->rate_step;
+    }
+
+    /* Release consumed input frames (src_pos counts them from the head). */
+    {
+        int consumed = stream->src_pos >> 16;
+        int in_frames = stream->input_len / stream->src_frame_bytes;
+
+        if (consumed > in_frames) {
+            consumed = in_frames;
+        }
+
+        if (consumed > 0) {
+            int bytes = consumed * stream->src_frame_bytes;
+
+            stream->input_head = (stream->input_head + bytes) % stream->input_capacity;
+            stream->input_len -= bytes;
+            stream->src_pos -= consumed << 16;
+        }
+    }
+
+    return written;
 }
 
 void SDL_FreeAudioStream(SDL_AudioStream* stream)
 {
+    if (stream == NULL) {
+        return;
+    }
+
+    free(stream->input);
     free(stream);
 }
 

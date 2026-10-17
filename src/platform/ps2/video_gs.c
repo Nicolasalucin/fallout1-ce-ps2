@@ -1,31 +1,37 @@
 /*
  * Video backend for the Fallout PS2 port: GS hardware-indexed rendering.
  *
- * Pipeline per frame (all DMA, no CPU color conversion):
+ * Pipeline per frame:
  *
  *   engine 8bpp 640x480 buffer
- *        |  gsKit_texture_upload (image + CLUT, DMA to VRAM)
+ *        |  CPU palette lookup through s_palette (LUT, ~1 ms on the EE)
  *        v
- *   GS VRAM: T8 texture (307200 B) + CT32 CLUT (1024 B)
+ *   s_fb_rgba: CT32 640x480 (1.2 MB, 64-byte aligned)
+ *        |  gsKit_texture_upload (DMA to VRAM, writeback-flushed)
+ *        v
+ *   GS VRAM: CT32 texture (no CLUT at all)
  *        |  full-screen textured quad
  *        v
  *   framebuffer flip on vsync -> NTSC 640x448 @ 60 Hz interlaced
  *
- * The GS bilinear filter is used for the 480->448 vertical downscale by
- * default; the 480p progressive mode (1:1 mapping) arrives with the video
- * options in a later phase.
+ * Doing the palette lookup on the EE (Option A) removes the GS CLUT,
+ * the CSM1 swizzle question and the T8 TBW pitfalls from the equation.
+ * The texture uses GS_FILTER_NEAREST for the 480->448 downscale; with a
+ * CT32 texture a linear filter would now also be color-correct if wanted.
  */
 
 #include "ps2_video.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <gsKit.h>
 #include <dmaKit.h>
 #include <gsToolkit.h>
+#include <kernel.h>
 
 #define PS2_SCR_W 640
 #define PS2_SCR_H 480
@@ -33,6 +39,7 @@
 #define PS2_OUT_H 448
 
 static int s_video_inited;
+static int s_present_logged;
 static GSGLOBAL* s_gs;
 static GSTEXTURE s_texture;
 
@@ -49,12 +56,17 @@ void ps2_video_debug_print_phases(void)
     s_phase_count = 0;
 }
 
-/* CLUT staging buffer: 256 entries in GS CT32 layout (DMA source). */
+/* Palette LUT in GS CT32 style (0xAABBGGRR), rebuilt from the engine
+ * palette by ps2_video_set_palette(). Used as the CPU lookup table. */
 static u32 s_palette[256] __attribute__((aligned(64)));
 
 /* Staging buffer used only if the engine ever presents a non-640x480 or
  * non-640-pitch surface (never happens today, kept as insurance). */
 static u8 s_staging[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
+
+/* CT32 framebuffer uploaded to the GS every frame: index -> palette RGBA.
+ * 1.2 MB in BSS, 64-byte aligned for the GIF DMAC. */
+static u32 s_fb_rgba[PS2_SCR_W * PS2_SCR_H] __attribute__((aligned(64)));
 
 void ps2_video_init(void)
 {
@@ -89,20 +101,17 @@ void ps2_video_init(void)
     memset(&s_texture, 0, sizeof(s_texture));
     s_texture.Width = PS2_SCR_W;
     s_texture.Height = PS2_SCR_H;
-    s_texture.PSM = GS_PSM_T8;
-    s_texture.ClutPSM = GS_PSM_CT32;
-    s_texture.Filter = GS_FILTER_LINEAR;
-    s_texture.ClutStorageMode = GS_CLUT_STORAGE_CSM1;
-    s_texture.Clut = s_palette;
+    s_texture.PSM = GS_PSM_CT32;
+    /* 480->448 downscale: NEAREST avoids resampling artifacts. With CT32
+     * the data is real color, so a linear filter would be correct too. */
+    s_texture.Filter = GS_FILTER_NEAREST;
     gsKit_setup_tbw(&s_texture);
     s_texture.Vram = gsKit_vram_alloc(s_gs,
-        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_T8), GS_VRAM_BLOCKSIZE_256);
-    s_texture.VramClut = gsKit_vram_alloc(s_gs,
-        gsKit_texture_size(16, 16, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
-    s_texture.Mem = (u32*)s_staging;
+        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
+    s_texture.Mem = (u32*)s_fb_rgba;
 
-    printf("[ps2] video: NTSC 640x448 60Hz, T8 tex @ %08x (TBW %u), CT32 CLUT @ %08x\n",
-        (unsigned)s_texture.Vram, (unsigned)s_texture.TBW, (unsigned)s_texture.VramClut);
+    printf("[ps2] video: NTSC 640x448 60Hz, CT32 tex @ %08x (TBW %u), CPU palette LUT\n",
+        (unsigned)s_texture.Vram, (unsigned)s_texture.TBW);
 }
 
 void ps2_video_shutdown(void)
@@ -121,6 +130,13 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
         return;
     }
 
+    if (!s_present_logged) {
+        s_present_logged = 1;
+        printf("[ps2] video: first present mem=%p pitch=%d, 64B aligned: %s\n",
+            (void*)pixels, pitch, ((uintptr_t)pixels & 63u) == 0 ? "yes" : "no");
+    }
+
+    const u8* indices;
     if (width != PS2_SCR_W || height != PS2_SCR_H || pitch != PS2_SCR_W) {
         /* Normalize exotic surfaces into the staging buffer. */
         int rows = height < PS2_SCR_H ? height : PS2_SCR_H;
@@ -130,15 +146,28 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
             memcpy(s_staging + (size_t)y * PS2_SCR_W,
                 (const u8*)pixels + (size_t)y * pitch, (size_t)cols);
         }
-        s_texture.Mem = (u32*)s_staging;
+        indices = s_staging;
     } else {
-        s_texture.Mem = (u32*)pixels;
+        indices = (const u8*)pixels;
     }
 
     {
         u32 t0 = ps2_time_ms();
         u32 t1, t2, t3, t4;
 
+        /* Paletted -> CT32 on the EE (Option A): one LUT read per pixel.
+         * s_palette is already in GS CT32 byte order (A B G R), so every
+         * entry can be stored verbatim. No GS CLUT involved. */
+        u32* dst = s_fb_rgba;
+        const u32* lut = s_palette;
+        for (int i = 0; i < PS2_SCR_W * PS2_SCR_H; i++) {
+            dst[i] = lut[indices[i]];
+        }
+        s_texture.Mem = (u32*)s_fb_rgba;
+
+        /* Write back the freshly built frame before the GIF DMAC fetches it
+         * (cached RAM; gsKit also flushes inside gsKit_texture_send()). */
+        FlushCache(0);
         gsKit_texture_upload(s_gs, &s_texture);
         t1 = ps2_time_ms();
 
@@ -378,19 +407,17 @@ void ps2_video_selftest(void)
     {
         u32 t0 = ps2_time_ms();
 
+        /* Bring back the color bars (the pattern probe above leaves only the
+         * gray ramp): they exercise palette indices 2..9 and 16/17 through
+         * the CPU LUT, so they double as a visual check of the palette order. */
+        selftest_build(pattern, 0);
+
         printf("[ps2] selftest: input window (600 frames)\n");
         for (int frame = 0; frame < 600; frame++) {
             SDL_PumpEvents();
-
-            s_texture.Mem = (u32*)pattern;
-            gsKit_texture_upload(s_gs, &s_texture);
-            gsKit_clear(s_gs, GS_SETREG_RGBAQ(0, 0, 0, 0, 0));
-            gsKit_prim_sprite_texture_3d(s_gs, &s_texture,
-                0.0f, 0.0f, 1, 0.0f, 0.0f,
-                (float)PS2_OUT_W, (float)PS2_OUT_H, 1, (float)PS2_SCR_W, (float)PS2_SCR_H,
-                GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0));
-            gsKit_queue_exec(s_gs);
-            gsKit_sync_flip(s_gs);
+            /* Full present path (LUT conversion included) at 60 Hz so the
+             * color bars on screen double as a palette-order check. */
+            ps2_video_present(pattern, PS2_SCR_W, PS2_SCR_H, PS2_SCR_W);
         }
         printf("[ps2] selftest: input window done (%u ms)\n", (unsigned)(ps2_time_ms() - t0));
     }

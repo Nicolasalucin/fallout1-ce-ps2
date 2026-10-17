@@ -67,7 +67,7 @@ Work in progress (native port under construction):
 - [x] F2 — Video: 8-bit framebuffer via gsKit (T8 + CLUT), 60 Hz present
 - [x] F3 — Input: DualShock 2 (libpad, analog mode, accelerated cursor; verified with a virtual pad)
 - [x] F4 — I/O: device probing (`host:` / `mass:` / `hdd0:`), case-insensitive paths, block buffering for the big `.dat` files
-- [ ] F5 — Audio: audsrv streaming (ACM music / voices / SFX)
+- [x] F5 — Audio: audsrv streaming (ACM music / voices / SFX), mixed on a dedicated EE thread
 - [ ] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + icons + on-screen keyboard
 - [ ] F7 — Memory: arena allocator, caches capped to fit 32 MB RDRAM
 - [ ] F8 — Mod loader + boot menu
@@ -127,6 +127,9 @@ The USB stick must be FAT32. MX4SIO exposes the SD card as `mass:` as well.
   `host:local_assets/`.
 - Development tip (ELF inside `build_ps2/`): symlink the assets next to it
   once with `ln -s ../local_assets build_ps2/local_assets`.
+- `audsrv.irx` must sit **next to the ELF** (the build copies it there
+  automatically): audio is loaded from disk at startup, which also works in
+  PCSX2 with a host filesystem.
 
 ## Building
 
@@ -249,7 +252,7 @@ Trabajo en curso (port nativo en construcción):
 - [x] F3 — Entrada: DualShock 2 (libpad, modo analógico, cursor acelerado)
 - [x] F4 — E/S: sondeo de `host:` / `mass:` / `hdd0:`, rutas sin distinguir
   mayúsculas, búfer por bloques para los `.dat` grandes
-- [ ] F5 — Audio: streaming por audsrv (voces, SFX y música `.ACM`)
+- [x] F5 — Audio: streaming por audsrv (música `.ACM`, voces y SFX), mezcla en un hilo propio del EE
 - [ ] F6 — Guardados en tarjeta de memoria (`mc0:/FALLOUT1_Sxx`) + iconos +
   teclado en pantalla
 - [ ] F7 — Memoria: asignador de arena, cachés ajustadas a los 32 MB de RDRAM
@@ -305,6 +308,9 @@ El pendrive debe estar en FAT32. MX4SIO expone la SD como `mass:` también.
   `host:local_assets/`.
 - Truco para desarrollo (ELF dentro de `build_ps2/`): enlaza los datos una vez
   con `ln -s ../local_assets build_ps2/local_assets`.
+- `audsrv.irx` debe estar **junto al ELF** (el build lo copia automáticamente):
+  el audio se carga de disco al arrancar, lo que también funciona en PCSX2
+  con host filesystem.
 
 ## Compilación
 

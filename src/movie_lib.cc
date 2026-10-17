@@ -12,6 +12,10 @@
 #include "audio_engine.h"
 #include "platform_compat.h"
 
+#ifdef __PS2__
+#include "platform/ps2/ps2_audio.h"
+#endif
+
 namespace fallout {
 
 typedef struct STRUCT_6B3690 {
@@ -99,7 +103,7 @@ static void _nfPkDecomp(unsigned char* buf, unsigned char* a2, int a3, int a4, i
 
 static constexpr uint16_t loadUInt16LE(const uint8_t* b);
 static constexpr uint32_t loadUInt32LE(const uint8_t* b);
-static uint8_t getOffset(uint16_t v);
+static int getOffset(uint16_t v);
 
 // 0x51EBD8
 static int dword_51EBD8 = 0;
@@ -799,8 +803,16 @@ static int _syncWait()
     if (_sync_active) {
         if (((_sync_time + 1000 * compat_timeGetTime()) & 0x80000000) != 0) {
             result = 1;
-            while (((_sync_time + 1000 * compat_timeGetTime()) & 0x80000000) != 0)
-                ;
+            while (((_sync_time + 1000 * compat_timeGetTime()) & 0x80000000) != 0) {
+#ifdef __PS2__
+                /* PS2: the EE kernel is priority-scheduled and does not
+                 * preempt a spinning thread; sleep so the audio worker can
+                 * keep advancing the cursor this wait is based on, and keep
+                 * feeding the SPU2 ring while we are stuck in here. */
+                SDL_Delay(1);
+                ps2_audio_pump();
+#endif
+            }
         }
         _sync_time += _sync_wait_quanta;
     }
@@ -1157,6 +1169,11 @@ static void _MVE_syncSync()
 {
     if (_sync_active) {
         while (((_sync_time + 1000 * compat_timeGetTime()) & 0x80000000) != 0) {
+#ifdef __PS2__
+            /* PS2: yield the EE while waiting (see _syncWait). */
+            SDL_Delay(1);
+            ps2_audio_pump();
+#endif
         }
     }
 }
@@ -1299,6 +1316,15 @@ static void _MVE_sndSync()
             break;
         }
         v0 = true;
+#ifdef __PS2__
+        /* PS2: this path loops back to wait for the audio play cursor to
+         * advance, and that cursor only moves while the audio worker thread
+         * runs. Sleep here so the EE switches to it instead of spinning the
+         * console into a total freeze (watchdog included). Keep the SPU2
+         * ring fed: this is exactly where its input would run dry. */
+        SDL_Delay(1);
+        ps2_audio_pump();
+#endif
     }
 
     if (dword_6B3660 != dword_6B3AE4) {
@@ -1323,6 +1349,14 @@ static int _syncWaitLevel(int a1)
     v2 = _sync_time + a1;
     do {
         result = v2 + 1000 * compat_timeGetTime();
+#ifdef __PS2__
+        if (result < 0) {
+            /* PS2: yield the EE while waiting (see _syncWait); never spin
+             * on the wall clock. */
+            SDL_Delay(1);
+            ps2_audio_pump();
+        }
+#endif
     } while (result < 0);
 
     _sync_time += _sync_wait_quanta;
@@ -1514,6 +1548,11 @@ static int _nfConfig(int a1, int a2, int a3, int a4)
     if (gMovieSdlSurface2 == NULL) {
         return 0;
     }
+
+    // Start both decoder buffers from a defined state: the first delta frame
+    // can reference blocks that have not been written yet.
+    memset(gMovieSdlSurface1->pixels, 0, (size_t)gMovieSdlSurface1->pitch * gMovieSdlSurface1->h);
+    memset(gMovieSdlSurface2->pixels, 0, (size_t)gMovieSdlSurface2->pitch * gMovieSdlSurface2->h);
 
     dword_6B4027 = a4;
     dword_6B402B = a3 * _mveBW - 8;
@@ -2802,7 +2841,13 @@ constexpr uint32_t loadUInt32LE(const uint8_t* b)
     return (b[3] << 24) | (b[2] << 16) | (b[1] << 8) | b[0];
 }
 
-uint8_t getOffset(uint16_t v)
+// NOTE(PS2 port): must return the full signed byte offset. The row component
+// from `dword_51F018` is a multiple of `_mveBW` (up to +-54864), so an 8-bit
+// return type truncates motion-compensation vectors (opcodes 2-5 in
+// `_nfPkDecomp`) and shreds MVE video into misplaced 8x8 blocks. This
+// restores the pre-refactor `((v11 << 24) >> 24) + dword_51F018[v11 >> 8]`
+// semantics (see alexbatalov/fallout1-ce PR #188).
+int getOffset(uint16_t v)
 {
     return static_cast<int8_t>(v & 0xFF) + dword_51F018[v >> 8];
 }

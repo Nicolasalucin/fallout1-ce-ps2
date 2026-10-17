@@ -36,8 +36,11 @@ int main(int argc, char* argv[])
     }
 
     /* Boot diagnostics: brings the GS up and validates frame pacing.
-     * Replaced by the mod-loader boot menu in F8. */
+     * Replaced by the mod-loader boot menu in F8. The smoke harness skips it:
+     * it costs about 20 seconds and is not part of the game itself. */
+#ifndef PS2_DEV_SMOKE_TEST
     ps2_video_selftest();
+#endif
 
     int rc = fallout::gnw_main(argc, argv);
 

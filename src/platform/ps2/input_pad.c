@@ -42,7 +42,7 @@
 
 /* Cursor tuning. */
 #define STICK_DEADZONE 0.22f
-#define CURSOR_MAX_SPEED 620.0f /* px/s at full deflection */
+#define CURSOR_MAX_SPEED 450.0f /* px/s at full deflection */
 #define CURSOR_LINEAR_TERM 0.15f /* weight of the linear term (precision) */
 #define CURSOR_SMOOTHING 0.35f /* velocity low-pass per poll */
 #define WHEEL_MAX_SPEED 14.0f /* wheel steps/s at full deflection */
@@ -221,9 +221,11 @@ static void process_sticks(const struct padButtonStatus* status, u32 now)
     last_time = now;
     dt = (float)elapsed / 1000.0f;
 
-    /* Left stick -> cursor. */
+    /* Left stick -> cursor. libpad reports the vertical axis with 0xFF at
+     * "up" (hardware and PCSX2 alike) while the cursor moves down for
+     * positive dy, so the vertical axis is negated. */
     speed_x = cursor_speed(stick_axis(status->ljoy_h));
-    speed_y = cursor_speed(stick_axis(status->ljoy_v));
+    speed_y = cursor_speed(-stick_axis(status->ljoy_v));
 
     s_vel_x += (speed_x - s_vel_x) * CURSOR_SMOOTHING;
     s_vel_y += (speed_y - s_vel_y) * CURSOR_SMOOTHING;
