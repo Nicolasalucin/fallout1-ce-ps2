@@ -35,6 +35,26 @@
 #include "plib/gnw/svga.h"
 #include "plib/gnw/text.h"
 
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+
+/* Dev-only Pip-Boy open/close phase timers (harvested by the smoke suite,
+ * see ps2_smoke.cc). Compiled out of release builds. */
+#define PS2_PIPB_TIMER_DECL() unsigned int ps2_pipb_t = ps2_time_ms()
+#define PS2_PIPB_TIMER_PHASE(name)                                                              \
+    do {                                                                                        \
+        unsigned int ps2_pipb_now = ps2_time_ms();                                              \
+        printf("[ps2][smoke] pipboy-phase %s: %u ms\n", name, ps2_pipb_now - ps2_pipb_t);       \
+        fflush(stdout);                                                                         \
+        ps2_pipb_t = ps2_pipb_now;                                                              \
+    } while (0)
+#else
+#define PS2_PIPB_TIMER_DECL()
+#define PS2_PIPB_TIMER_PHASE(name) \
+    do {                           \
+    } while (0)
+#endif
+
 namespace fallout {
 
 #define PIPBOY_RAND_MAX 32767
@@ -604,6 +624,8 @@ int pipboy(int intent)
 // 0x486C5C
 static int StartPipboy(int intent)
 {
+    PS2_PIPB_TIMER_DECL();
+
     bk_enable = map_disable_bk_processes();
 
     cycle_disable();
@@ -632,6 +654,8 @@ static int StartPipboy(int intent)
         return -1;
     }
 
+    PS2_PIPB_TIMER_PHASE("message");
+
     int index;
     for (index = 0; index < PIPBOY_FRM_COUNT; index++) {
         int fid = art_id(OBJ_TYPE_INTERFACE, pipgrphs[index], 0, 0, 0);
@@ -651,6 +675,8 @@ static int StartPipboy(int intent)
         return -1;
     }
 
+    PS2_PIPB_TIMER_PHASE("art");
+
     int pipboyWindowX = (screenGetWidth() - PIPBOY_WINDOW_WIDTH) / 2;
     int pipboyWindowY = (screenGetHeight() - PIPBOY_WINDOW_HEIGHT) / 2;
     pip_win = win_add(pipboyWindowX, pipboyWindowY, PIPBOY_WINDOW_WIDTH, PIPBOY_WINDOW_HEIGHT, colorTable[0], WINDOW_MODAL);
@@ -665,9 +691,13 @@ static int StartPipboy(int intent)
     scrn_buf = win_get_buf(pip_win);
     memcpy(scrn_buf, pipbmp[PIPBOY_FRM_BACKGROUND], PIPBOY_WINDOW_WIDTH * PIPBOY_WINDOW_HEIGHT);
 
+    PS2_PIPB_TIMER_PHASE("window");
+
     pip_note();
     pip_num(game_time_hour(), 4, PIPBOY_WINDOW_TIME_X, PIPBOY_WINDOW_TIME_Y);
     pip_date();
+
+    PS2_PIPB_TIMER_PHASE("header");
 
     int alarmButton = win_register_button(pip_win,
         124,
@@ -712,6 +742,8 @@ static int StartPipboy(int intent)
 
         y += 27;
     }
+
+    PS2_PIPB_TIMER_PHASE("buttons");
 
     if (intent == PIPBOY_OPEN_INTENT_REST) {
         if (!critter_can_obj_dude_rest()) {
@@ -798,6 +830,8 @@ static int StartPipboy(int intent)
         win_draw(pip_win);
     }
 
+    PS2_PIPB_TIMER_PHASE("logo");
+
     gsound_play_sfx_file("pipon");
     win_draw(pip_win);
 
@@ -807,6 +841,8 @@ static int StartPipboy(int intent)
 // 0x487218
 static void EndPipboy()
 {
+    PS2_PIPB_TIMER_DECL();
+
     bool showScriptMessages = false;
     configGetBool(&game_config, GAME_CONFIG_DEBUG_KEY, GAME_CONFIG_SHOW_SCRIPT_MESSAGES_KEY, &showScriptMessages);
 
@@ -835,6 +871,8 @@ static void EndPipboy()
     cycle_enable();
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);
     intface_redraw();
+
+    PS2_PIPB_TIMER_PHASE("end-total");
 }
 
 // 0x4872B4

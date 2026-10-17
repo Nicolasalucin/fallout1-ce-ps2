@@ -2,19 +2,29 @@
  * Automated in-engine smoke test harness (dev builds only).
  *
  * See ps2_smoke.h for the design notes. The harness takes over the game flow
- * from gnw_main() (movies and main menu are skipped), boots a premade dude
- * straight into Vault 13's entrance map and then walks through a scripted
- * validation sequence:
+ * from gnw_main() and exercises the whole UI hierarchy before booting into
+ * the game:
  *
- *   state 1  map render + script VM stability (dude present, frames advance)
- *   state 2  click-to-move: aims the cursor at a neighbour tile and clicks
- *            through the same SDL event path the pad uses; catches movement
- *            stutters (frame gap instrumentation, see below)
- *   state 3  inventory open (I) / close (Escape)
- *   state 4  Pip-Boy open (P) / close (Escape)
- *   state 5  map streaming stress (JUNKENT.MAP, timed)
- *   state 6  save/load round-trip (skipped until the F6 memory card backend)
- *   state 7  verdict + exit()
+ *   frontend  the real main menu loop is driven with synthetic key taps:
+ *             CREDITS screen, LOAD GAME with an empty save list, NEW GAME
+ *             reaching the character generator (premade cycling + clean
+ *             cancel) and EXIT. The intro movie is intentionally not
+ *             exercised by the smoke suite.
+ *   state 1   map render + script VM stability (dude present, frames advance)
+ *   state 2   click-to-move: aims the cursor at a neighbour tile and clicks
+ *             through the same SDL event path the pad uses; catches movement
+ *             stutters (frame gap instrumentation, see below)
+ *   state 3   inventory open (I) / close (Escape)
+ *   state 4   Pip-Boy open (P) / close (Escape)
+ *   state 5   in-game pause menu (ESC) + PREFERENCES screen: the four
+ *             sliders (master/music/SFX volume, brightness/gamma LUT) are
+ *             dragged through the real button+drag path, then the screens
+ *             are closed back to gameplay
+ *   state 6   character sheet (C) open / close (Escape)
+ *   state 7   Skilldex (S) open / close (Escape)
+ *   state 8   map streaming stress (JUNKENT.MAP, timed)
+ *   state 9   save/load round-trip (skipped until the F6 memory card backend)
+ *   state 10  verdict + exit()
  *
  * A stall detector runs on every event pump tick: the worst gap between two
  * ticks (i.e. the longest the engine went without servicing a frame) is
@@ -26,6 +36,11 @@
  * its own event loops. Only synthetic input and timers are handled there;
  * heavy engine work (map loads, the verdict) executes from the harness' own
  * top-level game loop, never from inside an event pump.
+ *
+ * The frontend phase runs those modal screen functions straight from
+ * ps2_smoke_main(); the tick keeps posting the scripted input from inside
+ * their event loops, and a per-screen deadline fires an ESC burst if a
+ * screen ever stops responding (the suite then fails instead of hanging).
  */
 
 #include "game/ps2_smoke.h"
@@ -36,15 +51,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "game/credits.h"
 #include "game/game.h"
 #include "game/gmouse.h"
 #include "game/gsound.h"
+#include "game/loadsave.h"
+#include "game/mainmenu.h"
 #include "game/map.h"
 #include "game/object.h"
 #include "game/palette.h"
 #include "game/proto.h"
 #include "game/roll.h"
 #include "game/scripts.h"
+#include "game/select.h"
 #include "game/tile.h"
 #include "game/worldmap.h"
 #include "plib/color/color.h"
@@ -73,15 +92,25 @@ namespace fallout {
 
 #define SMOKE_START_MAP "V13ENT.MAP"
 #define SMOKE_STREAM_MAP "JUNKENT.MAP"
-#define SMOKE_WATCHDOG_MS 90000
+#define SMOKE_WATCHDOG_MS 120000
 #define SMOKE_STALL_MS 1500
 #define SMOKE_WALK_ATTEMPTS 4
+
+/* Scripted synthetic input (see smoke_script_arm). Keep in sync with the
+ * widest single-screen sequence (the preferences slider drags). */
+#define SMOKE_SCRIPT_MAX 6
+
+/* Frontend per-screen deadline. */
+#define SMOKE_FRONTEND_STEP_MS 20000
 
 typedef enum SmokeState {
     SMOKE_STATE_MAP_VERIFY,
     SMOKE_STATE_WALK,
     SMOKE_STATE_INVENTORY,
     SMOKE_STATE_PIPBOY,
+    SMOKE_STATE_OPTIONS,
+    SMOKE_STATE_CHARSHEET,
+    SMOKE_STATE_SKILLDEX,
     SMOKE_STATE_MAP_STREAM,
     SMOKE_STATE_SAVELOAD,
     SMOKE_STATE_VERDICT,
@@ -128,6 +157,44 @@ static bool s_walk_moved = false;
  * loop: the stall detector must not count the load itself as a stutter. */
 static bool s_in_blocking_action = false;
 
+/* Frontend checks (set when each main menu screen was verified). */
+static bool s_fe_credits = false;
+static bool s_fe_load = false;
+static bool s_fe_newgame = false;
+
+/* ---- Scripted synthetic input ----
+ *
+ * A small timed script drives the frontend screens and the modal in-game UI
+ * states. Entries execute from ps2_smoke_tick() - i.e. from inside whatever
+ * event loop the engine is currently running - at `at` milliseconds after
+ * the script was armed. Keys are tapped (press + delayed release) and
+ * clicks go through the same SDL path the pad uses: move, press, delayed
+ * release. Besides clicking buttons, the release also terminates the
+ * engine's slider drag loops. */
+typedef enum SmokeScriptKind {
+    SMOKE_SCRIPT_KEY,
+    SMOKE_SCRIPT_CLICK,
+} SmokeScriptKind;
+
+typedef struct SmokeScriptEntry {
+    unsigned int at;
+    int kind;
+    int a; // KEY: SDL scancode; CLICK: target screen x
+    int b; // CLICK: target screen y
+} SmokeScriptEntry;
+
+static SmokeScriptEntry s_script[SMOKE_SCRIPT_MAX];
+static int s_script_count = 0;
+static int s_script_next = 0;
+static unsigned int s_script_base = 0;
+
+/* In-flight synthetic click: 0 = idle, 1 = move sent, 2 = press sent. */
+static int s_click_state = 0;
+static unsigned int s_click_time = 0;
+
+/* Deadline for the frontend blocking screen call (0 = none). */
+static unsigned int s_frontend_deadline = 0;
+
 static const char* smoke_state_name(SmokeState state)
 {
     switch (state) {
@@ -139,6 +206,12 @@ static const char* smoke_state_name(SmokeState state)
         return "inventory";
     case SMOKE_STATE_PIPBOY:
         return "pipboy";
+    case SMOKE_STATE_OPTIONS:
+        return "options";
+    case SMOKE_STATE_CHARSHEET:
+        return "charsheet";
+    case SMOKE_STATE_SKILLDEX:
+        return "skilldex";
     case SMOKE_STATE_MAP_STREAM:
         return "map-stream";
     case SMOKE_STATE_SAVELOAD:
@@ -168,6 +241,74 @@ static void smoke_key_tap_finish(unsigned int now)
     if (s_tap_scancode >= 0 && (int)(now - s_tap_release_at) >= 0) {
         ps2_sdl_post_key(s_tap_scancode, 0);
         s_tap_scancode = -1;
+    }
+}
+
+/* Arms a new timed input script (replaces any previous one). */
+static void smoke_script_arm(unsigned int now, const SmokeScriptEntry* entries, int count)
+{
+    if (count > SMOKE_SCRIPT_MAX) {
+        count = SMOKE_SCRIPT_MAX;
+    }
+
+    memcpy(s_script, entries, sizeof(SmokeScriptEntry) * count);
+    s_script_count = count;
+    s_script_next = 0;
+    s_script_base = now;
+}
+
+static void smoke_script_clear(void)
+{
+    s_script_count = 0;
+    s_script_next = 0;
+    s_click_state = 0;
+}
+
+static bool smoke_script_done(void)
+{
+    return s_script_next >= s_script_count && s_click_state == 0;
+}
+
+/* Runs due script entries; safe to call from any event loop. */
+static void smoke_script_tick(unsigned int now)
+{
+    if (s_click_state == 1) {
+        if (now - s_click_time >= 150) {
+            ps2_sdl_post_mouse_button(SDL_BUTTON_LEFT, 1);
+            s_click_state = 2;
+            s_click_time = now;
+        }
+        return;
+    }
+
+    if (s_click_state == 2) {
+        if (now - s_click_time >= 130) {
+            ps2_sdl_post_mouse_button(SDL_BUTTON_LEFT, 0);
+            s_click_state = 0;
+        }
+        return;
+    }
+
+    if (s_script_next >= s_script_count) {
+        return;
+    }
+
+    const SmokeScriptEntry* entry = &s_script[s_script_next];
+    if ((int)(now - (s_script_base + entry->at)) < 0) {
+        return;
+    }
+
+    s_script_next++;
+
+    if (entry->kind == SMOKE_SCRIPT_KEY) {
+        smoke_key_tap(entry->a, now);
+    } else {
+        int mx;
+        int my;
+        mouse_get_position(&mx, &my);
+        ps2_sdl_post_mouse_move(entry->a - mx, entry->b - my);
+        s_click_state = 1;
+        s_click_time = now;
     }
 }
 
@@ -231,6 +372,188 @@ static int smoke_boot_game(void)
     return 0;
 }
 
+/* ---- Frontend phase (main menu screens, before booting) ----
+ *
+ * Mirrors the corresponding branches of gnw_main() (main.cc): every screen
+ * is opened through the real entry point and driven with scripted keys from
+ * the tick, so the whole UI plumbing (input queue, button system, modal
+ * event loops) participates in the test. The static main.cc helpers used by
+ * its LOAD GAME branch (main_loadgame_new / main_unload_new /
+ * main_reset_system) are mirrored here with public engine entry points. */
+
+static void smoke_loadgame_prepare(void)
+{
+    game_user_wants_to_quit = 0;
+
+    if (obj_dude != NULL) {
+        obj_dude->flags &= ~OBJECT_FLAT;
+        obj_turn_on(obj_dude, NULL);
+    }
+
+    mouse_hide();
+    map_init();
+    gmouse_set_cursor(MOUSE_CURSOR_NONE);
+    mouse_show();
+}
+
+static void smoke_loadgame_unprepare(void)
+{
+    if (obj_dude != NULL) {
+        obj_turn_off(obj_dude, NULL);
+    }
+
+    map_exit();
+}
+
+/* Exercises the main menu buttons: CREDITS, LOAD GAME (with an empty save
+ * list), NEW GAME (reaches the character generator, cycles through the
+ * premades and cancels) and EXIT. Returns 0 unless the menu itself could
+ * not be created. */
+static int smoke_frontend_phase(void)
+{
+    static const int menu_keys[] = {
+        SDL_SCANCODE_C, // CREDITS
+        SDL_SCANCODE_L, // LOAD GAME
+        SDL_SCANCODE_N, // NEW GAME
+        SDL_SCANCODE_E, // EXIT
+    };
+
+    int step = 0;
+    bool done = false;
+
+    SMOKE_LOG("frontend: exercising main menu screens");
+
+    if (main_menu_create() != 0) {
+        smoke_fail("main_menu_create() failed");
+        return -1;
+    }
+
+    while (!done) {
+        SmokeScriptEntry entry;
+        int rc;
+
+        /* Mirrors the body of gnw_main's main menu loop. */
+        gsound_background_play_level_music("07desert", 11);
+        main_menu_show(1);
+        mouse_show();
+
+        entry.at = 900;
+        entry.kind = SMOKE_SCRIPT_KEY;
+        entry.a = menu_keys[step];
+        entry.b = 0;
+        smoke_script_arm(ps2_time_ms(), &entry, 1);
+        s_frontend_deadline = ps2_time_ms() + SMOKE_FRONTEND_STEP_MS;
+
+        rc = main_menu_loop();
+
+        s_frontend_deadline = 0;
+        mouse_hide();
+
+        switch (rc) {
+        case MAIN_MENU_CREDITS:
+            main_menu_hide(true);
+            {
+                SmokeScriptEntry exit_key = { 2000, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 };
+
+                smoke_script_arm(ps2_time_ms(), &exit_key, 1);
+                s_frontend_deadline = ps2_time_ms() + SMOKE_FRONTEND_STEP_MS;
+                credits("credits.txt", -1, false);
+                s_frontend_deadline = 0;
+
+                s_fe_credits = true;
+                SMOKE_LOG("frontend: CREDITS screen opened and exited on key");
+            }
+            break;
+
+        case MAIN_MENU_LOAD_GAME:
+            main_menu_hide(true);
+            main_menu_destroy();
+            gsound_background_stop();
+            {
+                SmokeScriptEntry exit_key = { 2500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 };
+                int win = win_add(0, 0, screenGetWidth(), screenGetHeight(), colorTable[0], WINDOW_MODAL | WINDOW_MOVE_ON_TOP);
+
+                smoke_loadgame_prepare();
+                loadColorTable("color.pal");
+                palette_fade_to(cmap);
+
+                smoke_script_arm(ps2_time_ms(), &exit_key, 1);
+                s_frontend_deadline = ps2_time_ms() + SMOKE_FRONTEND_STEP_MS;
+                rc = LoadGame(LOAD_SAVE_MODE_FROM_MAIN_MENU);
+                s_frontend_deadline = 0;
+
+                if (rc == 0) {
+                    s_fe_load = true;
+                    SMOKE_LOG("frontend: LOAD GAME empty save list opened/closed clean");
+                } else if (rc == -1) {
+                    smoke_fail("LoadGame() returned -1 (empty save list)");
+                } else {
+                    SMOKE_LOG("frontend: LOAD GAME returned %d (unexpected)", rc);
+                }
+
+                palette_fade_to(white_palette);
+                if (win != -1) {
+                    win_delete(win);
+                }
+
+                smoke_loadgame_unprepare();
+                game_reset();
+            }
+            main_menu_create();
+            break;
+
+        case MAIN_MENU_NEW_GAME:
+            main_menu_hide(true);
+            main_menu_destroy();
+            {
+                SmokeScriptEntry keys[] = {
+                    { 1500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RIGHT, 0 },
+                    { 2100, SMOKE_SCRIPT_KEY, SDL_SCANCODE_LEFT, 0 },
+                    { 2800, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+                };
+
+                smoke_script_arm(ps2_time_ms(), keys, 3);
+                s_frontend_deadline = ps2_time_ms() + SMOKE_FRONTEND_STEP_MS;
+                rc = select_character();
+                s_frontend_deadline = 0;
+
+                if (rc == 3) {
+                    s_fe_newgame = true;
+                    SMOKE_LOG("frontend: NEW GAME reached chargen (premades cycled, cancelled)");
+                } else {
+                    smoke_fail("select_character() did not cancel via ESC");
+                }
+            }
+            main_menu_create();
+            break;
+
+        case MAIN_MENU_EXIT:
+            done = true;
+            main_menu_hide(true);
+            main_menu_destroy();
+            gsound_background_stop();
+            SMOKE_LOG("frontend: main menu EXIT");
+            break;
+
+        default:
+            smoke_fail("unexpected main menu result");
+            main_menu_hide(true);
+            main_menu_destroy();
+            gsound_background_stop();
+            done = true;
+            break;
+        }
+
+        step++;
+
+        if (step >= (int)(sizeof(menu_keys) / sizeof(menu_keys[0]))) {
+            done = true;
+        }
+    }
+
+    return 0;
+}
+
 /* Heavy actions - top-level game loop only. */
 static void smoke_run_pending(unsigned int now)
 {
@@ -238,7 +561,7 @@ static void smoke_run_pending(unsigned int now)
     case SMOKE_ACTION_MAP_STREAM: {
         s_pending = SMOKE_ACTION_NONE;
 
-        SMOKE_LOG("state5: streaming %s ...", SMOKE_STREAM_MAP);
+        SMOKE_LOG("state8: streaming %s ...", SMOKE_STREAM_MAP);
 
         unsigned int start = now;
         char mapName[] = SMOKE_STREAM_MAP;
@@ -255,7 +578,7 @@ static void smoke_run_pending(unsigned int now)
             PlayCityMapMusic();
             obj_turn_on(obj_dude, NULL);
             tile_refresh_display();
-            SMOKE_LOG("state5: %s streamed in %u ms", SMOKE_STREAM_MAP, ps2_time_ms() - start);
+            SMOKE_LOG("state8: %s streamed in %u ms", SMOKE_STREAM_MAP, ps2_time_ms() - start);
         }
 
         /* Blocking load - do not count it as a frame gap. */
@@ -277,11 +600,15 @@ static void smoke_run_pending(unsigned int now)
         SMOKE_LOG("perf: suite %u ms, %u top-level frames, worst frame gap %u ms (%s)",
             now - s_suite_start, s_frames, s_worst_gap, smoke_state_name(s_worst_gap_state));
 
-        SMOKE_LOG("summary: map=%s walk=%s inventory=ok pipboy=ok streaming=%s save-load=skipped",
+        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=skipped",
+            s_fe_credits ? "ok" : "skip",
+            s_fe_load ? "ok" : "skip",
+            s_fe_newgame ? "ok" : "skip",
             SMOKE_START_MAP, s_walk_moved ? "ok" : "skip",
             SMOKE_STREAM_MAP);
 
         if (s_failures == 0) {
+            SMOKE_LOG("ALL_SUBSYSTEMS_OK");
             SMOKE_LOG("SUITE_FINISHED_SUCCESS: All game subsystems verified!");
         } else {
             SMOKE_LOG("SUITE_FINISHED_WITH_ERRORS: %d failure(s)", s_failures);
@@ -299,11 +626,32 @@ static void smoke_run_pending(unsigned int now)
 /* Timer/input state machine - event pump safe. */
 extern "C" void ps2_smoke_tick(void)
 {
+    unsigned int now = ps2_time_ms();
+
+    /* Synthetic input runs in every mode, including the frontend screens. */
+    smoke_key_tap_finish(now);
+    smoke_script_tick(now);
+
+    /* Frontend screens: if a modal screen stopped responding, fire an ESC
+     * burst so the suite fails loudly instead of hanging. */
+    if (s_frontend_deadline != 0 && (int)(now - s_frontend_deadline) >= 0) {
+        static const SmokeScriptEntry esc_burst[] = {
+            { 0, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+            { 700, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+            { 1400, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+            { 2100, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+            { 2800, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+            { 3500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+        };
+
+        s_frontend_deadline = 0;
+        smoke_fail("frontend screen timed out; forcing ESC");
+        smoke_script_arm(now, esc_burst, SMOKE_SCRIPT_MAX);
+    }
+
     if (!s_active) {
         return;
     }
-
-    unsigned int now = ps2_time_ms();
 
     /* Stall detector: worst gap between two pumps (blocking loads excluded). */
     if (!s_in_blocking_action && s_tick_last != 0) {
@@ -316,8 +664,6 @@ extern "C" void ps2_smoke_tick(void)
     s_tick_last = now;
 
     unsigned int elapsed = now - s_state_time;
-
-    smoke_key_tap_finish(now);
 
     if (now - s_suite_start > SMOKE_WATCHDOG_MS && s_state != SMOKE_STATE_VERDICT) {
         SMOKE_LOG("FAIL: watchdog expired in state %s", smoke_state_name(s_state));
@@ -421,6 +767,81 @@ extern "C" void ps2_smoke_tick(void)
             s_state_time = now;
         } else if (s_phase == 2 && elapsed >= 500) {
             SMOKE_LOG("state4 PASS: Pip-Boy open/close clean");
+            s_state = SMOKE_STATE_OPTIONS;
+            s_state_time = now;
+            s_phase = 0;
+        }
+        break;
+
+    case SMOKE_STATE_OPTIONS:
+        if (s_phase == 0) {
+            SMOKE_LOG("state5: in-game pause menu (ESC) + preferences");
+            smoke_key_tap(SDL_SCANCODE_ESCAPE, now);
+            s_phase = 1;
+            s_state_time = now;
+        } else if (s_phase == 1 && elapsed >= 1800) {
+            /* Enter PREFERENCES from the pause menu (P). */
+            smoke_key_tap(SDL_SCANCODE_P, now);
+            s_phase = 2;
+            s_state_time = now;
+        } else if (s_phase == 2 && elapsed >= 2200) {
+            /* Drag the master/music/SFX volume and brightness sliders
+             * through the real button+drag path. Slider rows span
+             * x 384..624; y = knob row (196 master, 247 music, 298 SFX,
+             * 400 brightness); the drag loop sets each value from the
+             * mouse x position, so clicking far right selects a high
+             * value. A first ESC cancels the PREFERENCES screen (gamma
+             * and volumes are restored), the second closes the menu. */
+            static const SmokeScriptEntry slides[] = {
+                { 0, SMOKE_SCRIPT_CLICK, 590, 196 },
+                { 700, SMOKE_SCRIPT_CLICK, 590, 247 },
+                { 1400, SMOKE_SCRIPT_CLICK, 590, 298 },
+                { 2100, SMOKE_SCRIPT_CLICK, 590, 400 },
+                { 3300, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+                { 4600, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
+            };
+
+            smoke_script_arm(now, slides, SMOKE_SCRIPT_MAX);
+            s_phase = 3;
+            s_state_time = now;
+        } else if (s_phase == 3 && smoke_script_done() && elapsed >= 5600) {
+            SMOKE_LOG("state5 PASS: pause menu + preference sliders clean");
+            s_state = SMOKE_STATE_CHARSHEET;
+            s_state_time = now;
+            s_phase = 0;
+        }
+        break;
+
+    case SMOKE_STATE_CHARSHEET:
+        if (s_phase == 0) {
+            SMOKE_LOG("state6: character sheet (C) open/close");
+            smoke_key_tap(SDL_SCANCODE_C, now);
+            s_phase = 1;
+            s_state_time = now;
+        } else if (s_phase == 1 && elapsed >= 2500) {
+            smoke_key_tap(SDL_SCANCODE_ESCAPE, now);
+            s_phase = 2;
+            s_state_time = now;
+        } else if (s_phase == 2 && elapsed >= 1500) {
+            SMOKE_LOG("state6 PASS: character sheet clean");
+            s_state = SMOKE_STATE_SKILLDEX;
+            s_state_time = now;
+            s_phase = 0;
+        }
+        break;
+
+    case SMOKE_STATE_SKILLDEX:
+        if (s_phase == 0) {
+            SMOKE_LOG("state7: Skilldex (S) open/close");
+            smoke_key_tap(SDL_SCANCODE_S, now);
+            s_phase = 1;
+            s_state_time = now;
+        } else if (s_phase == 1 && elapsed >= 1800) {
+            smoke_key_tap(SDL_SCANCODE_ESCAPE, now);
+            s_phase = 2;
+            s_state_time = now;
+        } else if (s_phase == 2 && elapsed >= 1200) {
+            SMOKE_LOG("state7 PASS: Skilldex clean");
             s_state = SMOKE_STATE_MAP_STREAM;
             s_state_time = now;
             s_phase = 0;
@@ -432,7 +853,7 @@ extern "C" void ps2_smoke_tick(void)
         /* s_phase 0 = waiting for the top-level loop to run the switch. */
         if (s_phase == 1 && elapsed >= 1500) {
             smoke_check_dude("map-junktown");
-            SMOKE_LOG("state5 PASS: map streaming within budget");
+            SMOKE_LOG("state8 PASS: map streaming within budget");
             s_state = SMOKE_STATE_SAVELOAD;
             s_state_time = now;
             s_phase = 0;
@@ -441,7 +862,7 @@ extern "C" void ps2_smoke_tick(void)
 
     case SMOKE_STATE_SAVELOAD:
         if (elapsed >= 200) {
-            SMOKE_LOG("state6 SKIPPED: save/load round-trip pending F6 (memory card backend)");
+            SMOKE_LOG("state9 SKIPPED: save/load round-trip pending F6 (memory card backend)");
             s_state = SMOKE_STATE_VERDICT;
             s_state_time = now;
             s_phase = 0;
@@ -459,6 +880,15 @@ extern "C" void ps2_smoke_tick(void)
 int ps2_smoke_main(void)
 {
     SMOKE_LOG("harness compiled in; taking over the game flow");
+
+    if (smoke_frontend_phase() != 0) {
+        SMOKE_LOG("SUITE_FINISHED_WITH_ERRORS: frontend phase failed");
+        fflush(stdout);
+        exit(0);
+    }
+
+    /* Make sure no stray scripted key leaks into gameplay. */
+    smoke_script_clear();
 
     if (smoke_boot_game() != 0) {
         SMOKE_LOG("SUITE_FINISHED_WITH_ERRORS: boot failed");
