@@ -101,6 +101,25 @@ if [ -d "$MAPS_BACKUP" ]; then
   say "restored $MAPS_DIR"
 fi
 
+# ------------------------------------------------- save slot (F6, host) ----
+# Dev builds keep the F6 save shim on the host, so slot 1 must be visible
+# from here: payload files plus the PS2 browser metadata.
+SLOT_DIR="$ROOT/local_assets/saves/SLOT01"
+if [ -d "$SLOT_DIR" ]; then
+  say "slot 1 on disk ($SLOT_DIR):"
+  ls -l "$SLOT_DIR" | tail -n +2 | sed 's/^/  /'
+  if [ -s "$SLOT_DIR/SAVE.DAT" ] \
+     && ls "$SLOT_DIR"/*.SAV >/dev/null 2>&1 \
+     && [ "$(head -c 4 "$SLOT_DIR/icon.sys" 2>/dev/null)" = "PS2D" ] \
+     && [ -s "$SLOT_DIR/icon.icn" ]; then
+    say "SAVE_LOAD_FILES_HOST_OK: slot 1 payload + icon.sys/icon.icn present"
+  else
+    say "WARNING: slot 1 is missing expected files"
+  fi
+else
+  say "WARNING: $SLOT_DIR not found (save stub did not run?)"
+fi
+
 # --------------------------------------------------------------- report ----
 if [ -f "$EMULOG" ]; then
   say "smoke output:"

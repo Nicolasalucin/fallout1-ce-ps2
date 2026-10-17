@@ -18,6 +18,7 @@
 #include <SDL.h>
 
 #include "ps2_fs.h"
+#include "ps2_save.h"
 #include "ps2_time.h"
 
 namespace fallout {
@@ -208,7 +209,14 @@ int compat_mkdir(const char* path)
     if (ps2_fs_resolve(path, resolved, sizeof(resolved), 1) != 0) {
         return -1;
     }
-    return mkdir(resolved, 0755);
+
+    int rc = mkdir(resolved, 0755);
+
+    /* F6: creating a save-slot directory materializes the PS2 browser
+     * metadata (icon.sys + icon.icn) inside it. */
+    ps2_save_slot_ensure_meta(resolved);
+
+    return rc;
 }
 
 unsigned int compat_timeGetTime(void)
@@ -228,7 +236,14 @@ int compat_remove(const char* path)
     if (ps2_fs_resolve(path, resolved, sizeof(resolved), 0) != 0) {
         return -1;
     }
-    return remove(resolved);
+
+    /* ps2sdk's fileio.h documents fioRemove as broken: its RPC dispatch
+     * lacks a break and falls through into "mkdir", so every successful
+     * remove() leaves an empty directory with the same name. Remove that
+     * phantom as well; rmdir() fails harmlessly when the path is gone. */
+    int rc = remove(resolved);
+    rmdir(resolved);
+    return rc;
 }
 
 int compat_rename(const char* oldFileName, const char* newFileName)
@@ -259,6 +274,18 @@ void compat_windows_path_to_native(char* path)
 
 void compat_resolve_path(char* path)
 {
+    /* F6: engine save directories (SAVEGAME\SLOTxx\...) are enumerated on
+     * the save device; the engine never sees the redirected location. */
+    {
+        char remapped[COMPAT_MAX_PATH];
+        if (ps2_save_remap(path, remapped, sizeof(remapped)) == 0) {
+            if (ps2_fs_canonicalize(remapped, 0) == 0) {
+                strcpy(path, remapped);
+            }
+            return;
+        }
+    }
+
     /* Best effort: canonicalize in place. Device paths resolve directly;
      * relative paths are tried against every data root. */
     if (strchr(path, ':') != NULL) {

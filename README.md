@@ -68,9 +68,9 @@ Work in progress (native port under construction):
 - [x] F3 — Input: DualShock 2 (libpad, analog mode, accelerated cursor; verified with a virtual pad)
 - [x] F4 — I/O: device probing (`host:` / `mass:` / `hdd0:`), case-insensitive paths, block buffering for the big `.dat` files
 - [x] F5 — Audio: audsrv streaming (ACM music / voices / SFX), mixed on a dedicated EE thread
-- [ ] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + icons + on-screen keyboard
+- [x] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + slot icons; auto-named saves (on-screen keyboard deferred to F8)
 - [ ] F7 — Memory: arena allocator, caches capped to fit 32 MB RDRAM
-- [ ] F8 — Mod loader + boot menu
+- [ ] F8 — Mod loader + boot menu + on-screen keyboard (save naming)
 - [ ] F9 — Hardware hardening (USB / MX4SIO / HDD)
 
 ---
@@ -253,10 +253,10 @@ Trabajo en curso (port nativo en construcción):
 - [x] F4 — E/S: sondeo de `host:` / `mass:` / `hdd0:`, rutas sin distinguir
   mayúsculas, búfer por bloques para los `.dat` grandes
 - [x] F5 — Audio: streaming por audsrv (música `.ACM`, voces y SFX), mezcla en un hilo propio del EE
-- [ ] F6 — Guardados en tarjeta de memoria (`mc0:/FALLOUT1_Sxx`) + iconos +
-  teclado en pantalla
+- [x] F6 — Guardados en tarjeta de memoria (`mc0:/FALLOUT1_Sxx`) + iconos por
+  ranura; nombre automático (teclado en pantalla para nombrar pospuesto a F8)
 - [ ] F7 — Memoria: asignador de arena, cachés ajustadas a los 32 MB de RDRAM
-- [ ] F8 — Cargador de mods + menú de arranque
+- [ ] F8 — Cargador de mods + menú de arranque + teclado en pantalla (nombre de guardado)
 - [ ] F9 — Robustez en hardware real (USB / MX4SIO / HDD)
 
 ## Bring Your Own Game (usa tus propios datos)

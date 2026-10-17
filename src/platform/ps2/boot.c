@@ -13,6 +13,7 @@
 #include "ps2_time.h"
 #include "ps2_input.h"
 #include "ps2_fs.h"
+#include "ps2_save.h"
 
 #include <stdio.h>
 
@@ -21,6 +22,7 @@ int ps2_boot(void)
     ps2_time_init();
     ps2_input_init();
     ps2_fs_init();
+    ps2_save_init();
 
     printf("[ps2] boot ok (F1), timebase %u ms\n", (unsigned)ps2_time_ms());
 

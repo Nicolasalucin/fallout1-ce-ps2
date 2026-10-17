@@ -23,7 +23,10 @@
  *   state 6   character sheet (C) open / close (Escape)
  *   state 7   Skilldex (S) open / close (Escape)
  *   state 8   map streaming stress (JUNKENT.MAP, timed)
- *   state 9   save/load round-trip (skipped until the F6 memory card backend)
+ *   state 9   save/load round-trip: saves the live Junkentown game into slot
+ *             1 (memory card / host fallback via the F6 shim), verifies the
+ *             files on disk, reboots to V13ENT, loads slot 1 back and
+ *             compares map/tile/inventory/time/quest flags
  *   state 10  verdict + exit()
  *
  * A stall detector runs on every event pump tick: the worst gap between two
@@ -57,6 +60,7 @@
 #include "game/gsound.h"
 #include "game/loadsave.h"
 #include "game/mainmenu.h"
+#include "game/game_vars.h"
 #include "game/map.h"
 #include "game/object.h"
 #include "game/palette.h"
@@ -67,10 +71,13 @@
 #include "game/tile.h"
 #include "game/worldmap.h"
 #include "plib/color/color.h"
+#include "plib/db/db.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/input.h"
 #include "plib/gnw/mouse.h"
 #include "plib/gnw/svga.h"
+#include "platform_compat.h"
+#include "ps2_save.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
 
@@ -119,6 +126,9 @@ typedef enum SmokeState {
 typedef enum SmokeAction {
     SMOKE_ACTION_NONE = 0,
     SMOKE_ACTION_MAP_STREAM,
+    SMOKE_ACTION_SAVE,
+    SMOKE_ACTION_LOAD,
+    SMOKE_ACTION_WIPE,
     SMOKE_ACTION_VERDICT,
 } SmokeAction;
 
@@ -161,6 +171,19 @@ static bool s_in_blocking_action = false;
 static bool s_fe_credits = false;
 static bool s_fe_load = false;
 static bool s_fe_newgame = false;
+
+/* State 9 - save/load round-trip (F6). */
+#define SMOKE_SAVE_GVAR GVAR_FIND_WATER_CHIP
+
+static char s9_map[32];
+static int s9_tile;
+static int s9_items;
+static int s9_time;
+static int s9_gvar;
+static int s9_save_rc;
+static int s9_load_rc;
+static bool s9_files_ok;
+static bool s_save_load_ok;
 
 /* ---- Scripted synthetic input ----
  *
@@ -554,6 +577,29 @@ static int smoke_frontend_phase(void)
     return 0;
 }
 
+/* Vanilla Fallout loads a save's map state from its .SAV file, so a live
+ * X.MAP map round-trips as X.SAV; accept either spelling of the same map. */
+static bool smoke_map_name_matches(const char* loaded, const char* saved)
+{
+    if (strcmp(loaded, saved) == 0) {
+        return true;
+    }
+
+    const char* lext = strrchr(loaded, '.');
+    const char* sext = strrchr(saved, '.');
+    if (lext == NULL || sext == NULL) {
+        return false;
+    }
+    if ((strcmp(lext, ".MAP") != 0 && strcmp(lext, ".SAV") != 0)
+        || (strcmp(sext, ".MAP") != 0 && strcmp(sext, ".SAV") != 0)) {
+        return false;
+    }
+
+    size_t llen = (size_t)(lext - loaded);
+    size_t slen = (size_t)(sext - saved);
+    return llen == slen && strncmp(loaded, saved, llen) == 0;
+}
+
 /* Heavy actions - top-level game loop only. */
 static void smoke_run_pending(unsigned int now)
 {
@@ -588,6 +634,64 @@ static void smoke_run_pending(unsigned int now)
         break;
     }
 
+    case SMOKE_ACTION_SAVE:
+        s_pending = SMOKE_ACTION_NONE;
+
+        SMOKE_LOG("state9: SAVE GAME dialog (slot 1)");
+        s_in_blocking_action = true;
+        s9_save_rc = SaveGame(LOAD_SAVE_MODE_NORMAL);
+        s_in_blocking_action = false;
+        smoke_script_clear();
+        s_frontend_deadline = 0;
+
+        /* The dialog ran modal frames - restart the gap measurement. */
+        s_tick_last = 0;
+        SMOKE_LOG("state9: SaveGame returned %d", s9_save_rc);
+
+        s_phase = 11;
+        s_state_time = ps2_time_ms();
+        break;
+
+    case SMOKE_ACTION_LOAD:
+        s_pending = SMOKE_ACTION_NONE;
+
+        SMOKE_LOG("state9: LOAD GAME dialog (slot 1)");
+        s_in_blocking_action = true;
+        s9_load_rc = LoadGame(LOAD_SAVE_MODE_NORMAL);
+        s_in_blocking_action = false;
+        smoke_script_clear();
+        s_frontend_deadline = 0;
+        s_tick_last = 0;
+        SMOKE_LOG("state9: LoadGame returned %d", s9_load_rc);
+
+        s_phase = 31;
+        s_state_time = ps2_time_ms();
+        break;
+
+    case SMOKE_ACTION_WIPE: {
+        s_pending = SMOKE_ACTION_NONE;
+
+        s_in_blocking_action = true;
+        int rc = smoke_boot_game();
+        s_in_blocking_action = false;
+        s_tick_last = 0;
+
+        if (rc == 0) {
+            /* Tamper with the live state so the load has to restore it. */
+            set_game_time(s9_time + 5000);
+            game_set_global_var(SMOKE_SAVE_GVAR, s9_gvar + 7);
+            SMOKE_LOG("state9: wiped state -> map=%s tile=%d items=%d time=%d gvar=%d",
+                map_data.name, obj_dude->tile, obj_dude->data.inventory.length,
+                game_time(), game_get_global_var(SMOKE_SAVE_GVAR));
+        } else {
+            smoke_fail("state9: wipe (reboot to V13ENT) failed");
+        }
+
+        s_phase = 21;
+        s_state_time = ps2_time_ms();
+        break;
+    }
+
     case SMOKE_ACTION_VERDICT:
         s_pending = SMOKE_ACTION_NONE;
 
@@ -600,12 +704,12 @@ static void smoke_run_pending(unsigned int now)
         SMOKE_LOG("perf: suite %u ms, %u top-level frames, worst frame gap %u ms (%s)",
             now - s_suite_start, s_frames, s_worst_gap, smoke_state_name(s_worst_gap_state));
 
-        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=skipped",
+        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=%s",
             s_fe_credits ? "ok" : "skip",
             s_fe_load ? "ok" : "skip",
             s_fe_newgame ? "ok" : "skip",
             SMOKE_START_MAP, s_walk_moved ? "ok" : "skip",
-            SMOKE_STREAM_MAP);
+            SMOKE_STREAM_MAP, s_save_load_ok ? "ok" : "skip");
 
         if (s_failures == 0) {
             SMOKE_LOG("ALL_SUBSYSTEMS_OK");
@@ -621,6 +725,41 @@ static void smoke_run_pending(unsigned int now)
     default:
         break;
     }
+}
+
+/* ---------------------------------------------------- state 9 helpers --- */
+
+/* Reads up to `size` bytes at `offset` from a file inside save slot 1,
+ * going through the platform shim (the exact path the engine uses), and
+ * returns the file length, or -1 when the file cannot be opened. */
+static long smoke_slot_file_read(const char* fileName, long offset, unsigned char* buf, int size)
+{
+    char path[128];
+    FILE* f;
+    long len;
+
+    snprintf(path, sizeof(path), "SAVEGAME\\SLOT01\\%s", fileName);
+
+    f = compat_fopen(path, "rb");
+    if (f == NULL) {
+        return -1;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    len = ftell(f);
+
+    if (buf != NULL && size > 0 && offset >= 0) {
+        memset(buf, 0, size);
+        if (fseek(f, offset, SEEK_SET) == 0) {
+            fread(buf, 1, size, f);
+        }
+    }
+
+    fclose(f);
+    return len;
 }
 
 /* Timer/input state machine - event pump safe. */
@@ -870,8 +1009,151 @@ extern "C" void ps2_smoke_tick(void)
         break;
 
     case SMOKE_STATE_SAVELOAD:
-        if (elapsed >= 200) {
-            SMOKE_LOG("state9 SKIPPED: save/load round-trip pending F6 (memory card backend)");
+        if (s_phase == 0) {
+            /* Capture the live state, then save it into slot 1. */
+            static const SmokeScriptEntry save_keys[] = {
+                { 2500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RETURN, 0 },
+                { 5200, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RETURN, 0 },
+            };
+
+            SMOKE_LOG("state9: save/load round-trip (slot 1)");
+            ps2_save_slot_wipe(1);
+
+            snprintf(s9_map, sizeof(s9_map), "%s", map_data.name);
+            s9_tile = obj_dude->tile;
+            s9_items = obj_dude->data.inventory.length;
+            s9_time = game_time();
+            s9_gvar = game_get_global_var(SMOKE_SAVE_GVAR);
+            SMOKE_LOG("state9: pre-save map=%s tile=%d items=%d time=%d gvar=%d",
+                s9_map, s9_tile, s9_items, s9_time, s9_gvar);
+
+            smoke_script_arm(now, save_keys, 2);
+            s_frontend_deadline = now + SMOKE_FRONTEND_STEP_MS;
+            s_pending = SMOKE_ACTION_SAVE;
+            s_phase = 10;
+        } else if (s_phase == 11) {
+            bool filesOk = s9_save_rc == 1;
+            unsigned char head[8];
+            long len;
+
+            if (s9_save_rc != 1) {
+                smoke_fail("state9: SaveGame did not return success");
+            }
+
+            /* SAVE.DAT must exist and carry data. */
+            len = smoke_slot_file_read("SAVE.DAT", -1, NULL, 0);
+            if (len <= 0) {
+                smoke_fail("state9: SAVE.DAT missing in slot 1");
+                filesOk = false;
+            } else {
+                SMOKE_LOG("state9: SAVE.DAT committed (%ld bytes)", len);
+            }
+
+            /* Map payloads: one .SAV per map. The listing goes through
+             * db_get_file_list(), i.e. through the same directory
+             * enumeration the engine uses on the memory card. */
+            char** savList = NULL;
+            int savCount = db_get_file_list("SAVEGAME\\SLOT01\\*.SAV", &savList, NULL, 0);
+            if (savCount <= 0) {
+                smoke_fail("state9: no map .SAV files committed to slot 1");
+                filesOk = false;
+            } else {
+                for (int i = 0; i < savCount; i++) {
+                    SMOKE_LOG("state9: slot payload: %s", savList[i]);
+                }
+            }
+            db_free_file_list(&savList, NULL);
+
+            /* PS2 browser metadata. */
+            len = smoke_slot_file_read("icon.sys", 0, head, 4);
+            if (len != PS2_SAVE_ICON_SYS_SIZE || memcmp(head, "PS2D", 4) != 0) {
+                smoke_fail("state9: icon.sys missing or invalid");
+                filesOk = false;
+            } else {
+                smoke_slot_file_read("icon.sys", 0xC0, head, 7);
+                if (memcmp(head, "Fallout", 7) != 0) {
+                    smoke_fail("state9: icon.sys title invalid");
+                    filesOk = false;
+                } else {
+                    SMOKE_LOG("state9: icon.sys OK (%ld bytes, PS2D, title 'Fallout')", len);
+                }
+            }
+
+            len = smoke_slot_file_read("icon.icn", 0, head, 4);
+            if (len != PS2_SAVE_ICON_ICN_SIZE
+                || head[0] != 0x00 || head[1] != 0x00
+                || head[2] != 0x01 || head[3] != 0x00) {
+                smoke_fail("state9: icon.icn missing or invalid");
+                filesOk = false;
+            } else {
+                SMOKE_LOG("state9: icon.icn OK (%ld bytes)", len);
+            }
+
+            s9_files_ok = filesOk;
+
+            /* Reboot to the start map; slot 1 must bring the junkentown
+             * state back afterwards. */
+            s_pending = SMOKE_ACTION_WIPE;
+            s_phase = 20;
+        } else if (s_phase == 21) {
+            static const SmokeScriptEntry load_keys[] = {
+                { 2500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RETURN, 0 },
+            };
+
+            if (strcmp(map_data.name, s9_map) == 0) {
+                smoke_fail("state9: wipe did not change the map");
+            }
+
+            smoke_script_arm(now, load_keys, 1);
+            s_frontend_deadline = now + SMOKE_FRONTEND_STEP_MS;
+            s_pending = SMOKE_ACTION_LOAD;
+            s_phase = 30;
+        } else if (s_phase == 31) {
+            bool ok = s9_files_ok && s9_load_rc == 1;
+
+            if (s9_load_rc != 1) {
+                smoke_fail("state9: LoadGame did not return success");
+            }
+
+            int tile = obj_dude != NULL ? obj_dude->tile : -1;
+            int items = obj_dude != NULL ? obj_dude->data.inventory.length : -1;
+            int gtime = game_time();
+            int gvar = game_get_global_var(SMOKE_SAVE_GVAR);
+
+            SMOKE_LOG("state9: post-load map=%s tile=%d items=%d time=%d gvar=%d",
+                map_data.name, tile, items, gtime, gvar);
+            SMOKE_LOG("state9: saved     map=%s tile=%d items=%d time=%d gvar=%d",
+                s9_map, s9_tile, s9_items, s9_time, s9_gvar);
+
+            if (!smoke_map_name_matches(map_data.name, s9_map)) {
+                smoke_fail("state9: map mismatch after load");
+                ok = false;
+            } else if (strcmp(map_data.name, s9_map) != 0) {
+                SMOKE_LOG("state9: map %s loaded as %s (saved-map .SAV, vanilla)", s9_map, map_data.name);
+            }
+            if (tile != s9_tile) {
+                smoke_fail("state9: player tile mismatch after load");
+                ok = false;
+            }
+            if (items != s9_items) {
+                smoke_fail("state9: inventory mismatch after load");
+                ok = false;
+            }
+            if (gtime != s9_time) {
+                smoke_fail("state9: game time mismatch after load");
+                ok = false;
+            }
+            if (gvar != s9_gvar) {
+                smoke_fail("state9: quest flags mismatch after load");
+                ok = false;
+            }
+
+            if (ok) {
+                s_save_load_ok = true;
+                SMOKE_LOG("SAVE_LOAD_ROUNDTRIP_OK");
+                SMOKE_LOG("state9 PASS: save/load round-trip (slot 1) verified");
+            }
+
             s_state = SMOKE_STATE_VERDICT;
             s_state_time = now;
             s_phase = 0;

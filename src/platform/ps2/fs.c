@@ -7,6 +7,8 @@
 
 #include "ps2_fs.h"
 
+#include "ps2_save.h"
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -299,6 +301,19 @@ int ps2_fs_resolve(const char* path, char* out, int out_size, int writable)
         return -1;
     }
 
+    /* F6: engine save slots (SAVEGAME\SLOTxx\...) are redirected to the save
+     * device before any data-root probing. */
+    {
+        char remapped[PS2_FS_PATH_MAX];
+        if (ps2_save_remap(norm, remapped, sizeof(remapped)) == 0) {
+            if (ps2_fs_canonicalize(remapped, writable) != 0) {
+                return -1;
+            }
+            strcpy(out, remapped);
+            return 0;
+        }
+    }
+
     if (strchr(norm, ':') != NULL) {
         if (ps2_fs_canonicalize(norm, writable) != 0) {
             return -1;
@@ -344,6 +359,17 @@ FILE* ps2_fs_fopen(const char* path, const char* mode)
 #ifdef PS2_DEV_SMOKE_TEST
     ps2_fs_stat_fopen_calls++;
 #endif
+
+    /* F6: save-slot files live on the save device, not in the data roots. */
+    {
+        char remapped[PS2_FS_PATH_MAX];
+        if (ps2_save_remap(norm, remapped, sizeof(remapped)) == 0) {
+            if (ps2_fs_canonicalize(remapped, writable) != 0) {
+                return NULL;
+            }
+            return fs_do_open(remapped, mode, writable);
+        }
+    }
 
     if (strchr(norm, ':') != NULL) {
         if (ps2_fs_canonicalize(norm, writable) != 0) {
