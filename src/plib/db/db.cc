@@ -42,6 +42,17 @@ typedef struct DB_FILE {
     int field_18;
     unsigned char* field_1C;
     unsigned char* field_20;
+#ifdef __PS2__
+    // PS2 port: write aggregation buffer for loose files opened for writing.
+    unsigned char* ps2_write_buf;
+    size_t ps2_write_len;
+    size_t ps2_write_cap;
+    // PS2 port: identifies fully-decoded DAT entry buffers for the 1-slot
+    // decoded-entry reuse cache (see ps2_db_reuse_decoded_entry).
+    int ps2_decoded_offset;
+    int ps2_decoded_length;
+    int ps2_decoded_kind;
+#endif
 } DB_FILE;
 
 typedef struct DB_DATABASE {
@@ -148,6 +159,27 @@ static db_read_callback* read_callback = NULL;
 
 // 0x6713C8
 static DB_DATABASE* database_list[DB_DATABASE_LIST_CAPACITY];
+
+#ifdef __PS2__
+// PS2 port: write aggregation and 1-slot decoded-entry reuse (implementations
+// follow the definition of db_register_callback users below).
+#define PS2_DB_WRITE_FLAG 0x100
+#define PS2_DB_WRITE_BUF_INITIAL 65536
+#define PS2_DB_WRITE_BUF_MAX 1048576
+#define PS2_DB_DECODE_CACHE_MAX 1048576
+
+static unsigned char* ps2_db_decoded_buf = NULL;
+static int ps2_db_decoded_offset;
+static int ps2_db_decoded_length;
+static int ps2_db_decoded_kind;
+static DB_DATABASE* ps2_db_decoded_database = NULL;
+
+static size_t ps2_db_write(DB_FILE* stream, const void* buf, size_t length);
+static int ps2_db_write_flush(DB_FILE* stream);
+static void ps2_db_mark_decoded_entry(DB_FILE* stream, int offset, int length, int kind);
+static DB_FILE* ps2_db_reuse_decoded_entry(int offset, int length, int kind, int flags);
+static void ps2_db_free_caches(void);
+#endif
 
 // 0x4AEE90
 DB_DATABASE* db_init(const char* datafile, const char* datafile_path, const char* patches_path, int show_cursor)
@@ -257,6 +289,10 @@ int db_close(DB_DATABASE* db_handle)
 void db_exit()
 {
     int index;
+
+#ifdef __PS2__
+    ps2_db_free_caches();
+#endif
 
     for (index = 0; index < DB_DATABASE_LIST_CAPACITY; index++) {
         if (database_list[index] != NULL) {
@@ -523,6 +559,116 @@ int db_read_to_buf(const char* filename, unsigned char* buf)
     return 0;
 }
 
+#ifdef __PS2__
+// PS2 port: write aggregation. The IOP has no write back cache and every
+// fwrite/fputc is a synchronous SIF round trip; incremental writers (map and
+// save files write thousands of small ints and bytes) spend almost all of
+// their time in RPC. Aggregate in EE RAM and flush with a single fwrite at
+// close or before a seek.
+static int ps2_db_write_flush(DB_FILE* stream)
+{
+    if (stream->ps2_write_len != 0 && stream->uncompressed_file_stream != NULL) {
+        if (fwrite(stream->ps2_write_buf, 1, stream->ps2_write_len, stream->uncompressed_file_stream) != stream->ps2_write_len) {
+            stream->ps2_write_len = 0;
+            return -1;
+        }
+
+        stream->ps2_write_len = 0;
+    }
+
+    return 0;
+}
+
+static size_t ps2_db_write(DB_FILE* stream, const void* buf, size_t length)
+{
+    if ((stream->flags & (0x4 | PS2_DB_WRITE_FLAG)) != (0x4 | PS2_DB_WRITE_FLAG)
+        || stream->uncompressed_file_stream == NULL
+        || length == 0) {
+        return 0;
+    }
+
+    if (length >= PS2_DB_WRITE_BUF_MAX) {
+        if (ps2_db_write_flush(stream) != 0) {
+            return 0;
+        }
+
+        return fwrite(buf, 1, length, stream->uncompressed_file_stream);
+    }
+
+    if (stream->ps2_write_len + length > stream->ps2_write_cap) {
+        if (ps2_db_write_flush(stream) != 0) {
+            return 0;
+        }
+
+        if (length > stream->ps2_write_cap) {
+            size_t new_cap = PS2_DB_WRITE_BUF_INITIAL;
+            while (new_cap < length) {
+                new_cap *= 2;
+            }
+
+            unsigned char* new_buf = (unsigned char*)internal_malloc(new_cap);
+            if (new_buf != NULL) {
+                if (stream->ps2_write_buf != NULL) {
+                    internal_free(stream->ps2_write_buf);
+                }
+
+                stream->ps2_write_buf = new_buf;
+                stream->ps2_write_cap = new_cap;
+            }
+        }
+    }
+
+    if (stream->ps2_write_buf == NULL || stream->ps2_write_cap < length) {
+        return fwrite(buf, 1, length, stream->uncompressed_file_stream);
+    }
+
+    memcpy(stream->ps2_write_buf + stream->ps2_write_len, buf, length);
+    stream->ps2_write_len += length;
+    return length;
+}
+
+static void ps2_db_mark_decoded_entry(DB_FILE* stream, int offset, int length, int kind)
+{
+    stream->ps2_decoded_offset = offset;
+    stream->ps2_decoded_length = length;
+    stream->ps2_decoded_kind = kind;
+}
+
+static DB_FILE* ps2_db_reuse_decoded_entry(int offset, int length, int kind, int flags)
+{
+    if (ps2_db_decoded_buf == NULL
+        || ps2_db_decoded_database != current_database
+        || ps2_db_decoded_offset != offset
+        || ps2_db_decoded_length != length
+        || ps2_db_decoded_kind != kind) {
+        return NULL;
+    }
+
+    unsigned char* buf = ps2_db_decoded_buf;
+    ps2_db_decoded_buf = NULL;
+    ps2_db_decoded_database = NULL;
+
+    DB_FILE* stream = db_add_fp_rec(NULL, buf, length, flags | 0x10 | 0x8);
+    if (stream == NULL) {
+        internal_free(buf);
+        return NULL;
+    }
+
+    ps2_db_mark_decoded_entry(stream, offset, length, kind);
+    return stream;
+}
+
+static void ps2_db_free_caches(void)
+{
+    if (ps2_db_decoded_buf != NULL) {
+        internal_free(ps2_db_decoded_buf);
+        ps2_db_decoded_buf = NULL;
+    }
+
+    ps2_db_decoded_database = NULL;
+}
+#endif
+
 // 0x4AF9C4
 DB_FILE* db_fopen(const char* filename, const char* mode)
 {
@@ -621,6 +767,9 @@ DB_FILE* db_fopen(const char* filename, const char* mode)
                 if (slurped != NULL) {
                     return slurped;
                 }
+            } else {
+                // PS2 port: mark write streams so their writes aggregate in RAM.
+                flags |= PS2_DB_WRITE_FLAG;
             }
 #endif
             return db_add_fp_rec(stream, NULL, 0, flags | 0x4);
@@ -657,12 +806,34 @@ DB_FILE* db_fopen(const char* filename, const char* mode)
         de.flags = 16;
     }
 
+#ifdef __PS2__
+    // PS2 port: reuse the buffer left behind by the previous close of this
+    // same entry (art loading decodes each FRM once for the size probe and
+    // once for the load; this hands the first decode to the second open).
+    {
+        DB_FILE* reused = ps2_db_reuse_decoded_entry(de.offset, de.length, de.flags & 0xF0, flags);
+        if (reused != NULL) {
+            return reused;
+        }
+    }
+#endif
+
     switch (de.flags & 0xF0) {
     case 16:
         buf = (unsigned char*)internal_malloc(de.length);
         if (buf != NULL) {
             lzss_decode_to_buf(current_database->stream, buf, de.field_C);
+#ifdef __PS2__
+            {
+                DB_FILE* stream = db_add_fp_rec(NULL, buf, de.length, flags | 0x10 | 0x8);
+                if (stream != NULL) {
+                    ps2_db_mark_decoded_entry(stream, de.offset, de.length, 16);
+                }
+                return stream;
+            }
+#else
             return db_add_fp_rec(NULL, buf, de.length, flags | 0x10 | 0x8);
+#endif
         }
         break;
     case 32:
@@ -676,6 +847,7 @@ DB_FILE* db_fopen(const char* filename, const char* mode)
                 if (fread(buf, 1, de.length, current_database->stream) == (size_t)de.length) {
                     DB_FILE* slurped = db_add_fp_rec(NULL, buf, de.length, flags | 0x10 | 0x8);
                     if (slurped != NULL) {
+                        ps2_db_mark_decoded_entry(slurped, de.offset, de.length, 32);
                         return slurped;
                     }
                 }
@@ -695,6 +867,7 @@ DB_FILE* db_fopen(const char* filename, const char* mode)
         if (buf != NULL) {
             DB_FILE* slurped = db_add_fp_rec(NULL, buf, de.length, flags | 0x10 | 0x8);
             if (slurped != NULL) {
+                ps2_db_mark_decoded_entry(slurped, de.offset, de.length, 64);
                 return slurped;
             }
 
@@ -1098,6 +1271,12 @@ int db_fseek(DB_FILE* stream, long offset, int origin)
     unsigned char* v1;
     int chunks;
 
+#ifdef __PS2__
+    if (stream != NULL && (stream->flags & PS2_DB_WRITE_FLAG) != 0) {
+        ps2_db_write_flush(stream);
+    }
+#endif
+
     if (stream != NULL) {
         if ((stream->flags & 0x4) != 0) {
             rc = fseek(stream->uncompressed_file_stream, offset, origin);
@@ -1178,7 +1357,15 @@ long db_ftell(DB_FILE* stream)
 {
     if (stream != NULL) {
         if ((stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+            long pos = ftell(stream->uncompressed_file_stream);
+            if (pos >= 0 && stream->ps2_write_len != 0) {
+                pos += (long)stream->ps2_write_len;
+            }
+            return pos;
+#else
             return ftell(stream->uncompressed_file_stream);
+#endif
         } else {
             switch (stream->flags & 0xF0) {
             case 16:
@@ -1198,6 +1385,11 @@ void db_rewind(DB_FILE* stream)
 {
     if (stream != NULL) {
         if ((stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+            if ((stream->flags & PS2_DB_WRITE_FLAG) != 0) {
+                ps2_db_write_flush(stream);
+            }
+#endif
             rewind(stream->uncompressed_file_stream);
         } else {
             switch (stream->flags & 0xF0) {
@@ -1224,7 +1416,15 @@ void db_rewind(DB_FILE* stream)
 size_t db_fwrite(const void* buf, size_t size, size_t count, DB_FILE* stream)
 {
     if (stream != NULL && (stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+        if (size != 0) {
+            return ps2_db_write(stream, buf, size * count) / size;
+        }
+
+        return 0;
+#else
         return fwrite(buf, size, count, stream->uncompressed_file_stream);
+#endif
     }
 
     return count - 1;
@@ -1234,7 +1434,12 @@ size_t db_fwrite(const void* buf, size_t size, size_t count, DB_FILE* stream)
 int db_fputc(int ch, DB_FILE* stream)
 {
     if (stream != NULL && (stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+        unsigned char c = (unsigned char)ch;
+        return ps2_db_write(stream, &c, 1) == 1 ? ch : -1;
+#else
         return fputc(ch, stream->uncompressed_file_stream);
+#endif
     }
 
     return -1;
@@ -1244,7 +1449,12 @@ int db_fputc(int ch, DB_FILE* stream)
 int db_fputs(const char* string, DB_FILE* stream)
 {
     if (stream != NULL && (stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+        size_t length = strlen(string);
+        return ps2_db_write(stream, string, length) == length ? 0 : -1;
+#else
         return fputs(string, stream->uncompressed_file_stream);
+#endif
     }
 
     return -1;
@@ -1599,7 +1809,25 @@ int db_fprintf(DB_FILE* stream, const char* format, ...)
 
     va_start(args, format);
     if (stream != NULL && (stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+        char buf[512];
+        va_list args2;
+        va_copy(args2, args);
+        rc = vsnprintf(buf, sizeof(buf), format, args2);
+        va_end(args2);
+        if (rc >= 0) {
+            size_t length = (size_t)rc;
+            if (length < sizeof(buf)) {
+                rc = ps2_db_write(stream, buf, length) == length ? rc : -1;
+            } else {
+                // Rare long line: format directly (flushing first keeps order).
+                ps2_db_write_flush(stream);
+                rc = vfprintf(stream->uncompressed_file_stream, format, args);
+            }
+        }
+#else
         rc = vfprintf(stream->uncompressed_file_stream, format, args);
+#endif
     } else {
         rc = -1;
     }
@@ -2497,12 +2725,43 @@ static int db_delete_fp_rec(DB_FILE* stream)
     }
 
     if ((stream->flags & 0x4) != 0) {
+#ifdef __PS2__
+        if ((stream->flags & PS2_DB_WRITE_FLAG) != 0) {
+            ps2_db_write_flush(stream);
+            if (stream->ps2_write_buf != NULL) {
+                internal_free(stream->ps2_write_buf);
+                stream->ps2_write_buf = NULL;
+            }
+        }
+#endif
         fclose(stream->uncompressed_file_stream);
     } else {
         switch (stream->flags & 0xF0) {
         case 16:
             if (stream->field_1C != NULL) {
+#ifdef __PS2__
+                // Park fully-decoded DAT entry buffers in the 1-slot reuse
+                // cache so an immediate reopen (art size probe -> load) does
+                // not decode the same entry twice.
+                if (stream->ps2_decoded_kind != 0
+                    && stream->field_C == stream->ps2_decoded_length
+                    && stream->field_C <= PS2_DB_DECODE_CACHE_MAX) {
+                    if (ps2_db_decoded_buf != NULL) {
+                        internal_free(ps2_db_decoded_buf);
+                    }
+
+                    ps2_db_decoded_buf = stream->field_1C;
+                    ps2_db_decoded_offset = stream->ps2_decoded_offset;
+                    ps2_db_decoded_length = stream->ps2_decoded_length;
+                    ps2_db_decoded_kind = stream->ps2_decoded_kind;
+                    ps2_db_decoded_database = stream->database;
+                    stream->field_1C = NULL;
+                } else {
+                    internal_free(stream->field_1C);
+                }
+#else
                 internal_free(stream->field_1C);
+#endif
             }
             break;
         case 32:
@@ -2805,17 +3064,25 @@ static unsigned char* db_slurp_dat_entry_chunked(FILE* stream, int length)
             if (fread(buf + pos, 1, chunk_size, stream) != (size_t)chunk_size) {
                 break;
             }
+
+            pos += chunk_size;
         } else {
-            if (chunk_size == 0 || chunk_size > length - pos) {
+            // NOTE: The chunk token is the size of the stored (compressed)
+            // payload; the decoder consumes exactly that many input bytes and
+            // produces an arbitrary number of decoded bytes.
+            int decoded;
+
+            if (chunk_size == 0) {
                 break;
             }
 
-            if (lzss_decode_to_buf(stream, buf + pos, chunk_size) != chunk_size) {
+            decoded = lzss_decode_to_buf(stream, buf + pos, chunk_size);
+            if (decoded <= 0 || decoded > length - pos) {
                 break;
             }
+
+            pos += decoded;
         }
-
-        pos += chunk_size;
     }
 
     if (pos != length) {

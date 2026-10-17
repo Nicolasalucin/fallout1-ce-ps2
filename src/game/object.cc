@@ -400,6 +400,9 @@ static int obj_read_obj(Object* obj, DB_FILE* stream)
     int field_74;
 
     if (db_freadInt(stream, &(obj->id)) == -1) return -1;
+#ifdef __PS2__
+    ps2_new_obj_id_mark_dirty();
+#endif
     if (db_freadInt(stream, &(obj->tile)) == -1) return -1;
     if (db_freadInt(stream, &(obj->x)) == -1) return -1;
     if (db_freadInt(stream, &(obj->y)) == -1) return -1;
@@ -1026,19 +1029,43 @@ int obj_new(Object** objectPtr, int fid, int pid)
 {
     ObjectListNode* objectListNode;
 
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t ps2_on_t0 = ps2_time_us();
+    uint64_t ps2_on_prev = ps2_on_t0;
+    uint64_t ps2_on_node = 0;
+    uint64_t ps2_on_obj = 0;
+    uint64_t ps2_on_insert = 0;
+    uint64_t ps2_on_update = 0;
+    uint64_t ps2_on_proto = 0;
+    uint64_t ps2_on_flags = 0;
+    unsigned long long ps2_on_lock_us0 = ps2_obj_prof_lock_us;
+    int ps2_on_lock_calls0 = ps2_obj_prof_lock_calls;
+#define PS2_ON_MARK(acc) \
+    do { \
+        uint64_t ps2_on_now = ps2_time_us(); \
+        acc += ps2_on_now - ps2_on_prev; \
+        ps2_on_prev = ps2_on_now; \
+    } while (0)
+#else
+#define PS2_ON_MARK(acc) ((void)0)
+#endif
+
     // NOTE: Uninline;
     if (obj_create_object_node(&objectListNode) == -1) {
         return -1;
     }
+    PS2_ON_MARK(ps2_on_node);
 
     if (obj_create_object(&(objectListNode->obj)) == -1) {
         // Uninline.
         obj_destroy_object_node(&objectListNode);
         return -1;
     }
+    PS2_ON_MARK(ps2_on_obj);
 
     objectListNode->obj->fid = fid;
     obj_insert(objectListNode);
+    PS2_ON_MARK(ps2_on_insert);
 
     if (objectPtr) {
         *objectPtr = objectListNode->obj;
@@ -1055,11 +1082,13 @@ int obj_new(Object** objectPtr, int fid, int pid)
     }
 
     proto_update_init(objectListNode->obj);
+    PS2_ON_MARK(ps2_on_update);
 
     Proto* proto = NULL;
     if (proto_ptr(pid, &proto) == -1) {
         return 0;
     }
+    PS2_ON_MARK(ps2_on_proto);
 
     obj_set_light(objectListNode->obj, proto->lightDistance, proto->lightIntensity, NULL);
 
@@ -1106,8 +1135,30 @@ int obj_new(Object** objectPtr, int fid, int pid)
     if ((proto->flags & 0x1000) != 0) {
         objectListNode->obj->flags |= OBJECT_NO_HIGHLIGHT;
     }
+    PS2_ON_MARK(ps2_on_flags);
 
     obj_new_sid(objectListNode->obj, &(objectListNode->obj->sid));
+
+#ifdef PS2_DEV_SMOKE_TEST
+    {
+        uint64_t ps2_on_total = ps2_time_us() - ps2_on_t0;
+        if (ps2_on_total > 20000) {
+            printf("[ps2][smoke] prof: obj_new fid=%x pid=%d: total=%u node=%u obj=%u insert=%u update=%u proto=%u flags=%u us, locks=%d %u us\n",
+                fid, pid,
+                (unsigned int)ps2_on_total,
+                (unsigned int)ps2_on_node,
+                (unsigned int)ps2_on_obj,
+                (unsigned int)ps2_on_insert,
+                (unsigned int)ps2_on_update,
+                (unsigned int)ps2_on_proto,
+                (unsigned int)ps2_on_flags,
+                (int)(ps2_obj_prof_lock_calls - ps2_on_lock_calls0),
+                (unsigned int)(ps2_obj_prof_lock_us - ps2_on_lock_us0));
+            fflush(stdout);
+        }
+    }
+#undef PS2_ON_MARK
+#endif
 
     return 0;
 }
@@ -3710,6 +3761,10 @@ static void obj_insert(ObjectListNode* objectListNode)
                 }
 
                 if ((obj->flags & OBJECT_FLAT) == (objectListNode->obj->flags & OBJECT_FLAT)) {
+#ifndef __PS2__
+                    // NOTE: Upstream has a dead comparison here: `v11` is never
+                    // set, so this block can never break the loop and only forces
+                    // art loads while inserting. Skipped on PS2.
                     bool v11 = false;
                     CacheEntry* a2;
 #ifdef PS2_DEV_SMOKE_TEST
@@ -3733,6 +3788,7 @@ static void obj_insert(ObjectListNode* objectListNode)
 #ifdef PS2_DEV_SMOKE_TEST
                     ps2_obj_prof_lock_us += ps2_time_us() - prof_tl;
                     ps2_obj_prof_lock_calls++;
+#endif
 #endif
                 }
             }
@@ -3848,7 +3904,12 @@ static int obj_adjust_light(Object* obj, int a2, Rect* rect)
     adjustLightIntensity(obj->elevation, obj->tile, obj->lightIntensity);
 
     Rect objectRect;
-    obj_bound(obj, &objectRect);
+    // NOTE: The bounds only feed the caller's refresh rect; skip the art
+    // lock when the caller does not need it (obj_rebuild_all_light passes
+    // NULL, and doing this per lit object is what made rebuilds slow).
+    if (rect != NULL) {
+        obj_bound(obj, &objectRect);
+    }
 
     if (obj->lightDistance > 8) {
         obj->lightDistance = 8;
@@ -4405,9 +4466,12 @@ static int obj_adjust_light(Object* obj, int a2, Rect* rect)
                                 }
 
                                 if (objectListNode->obj->elevation == obj->elevation) {
-                                    Rect v29;
-                                    obj_bound(objectListNode->obj, &v29);
-                                    rect_min_bound(&objectRect, &v29, &objectRect);
+                                    // Bounds accumulation only feeds the refresh rect.
+                                    if (rect != NULL) {
+                                        Rect v29;
+                                        obj_bound(objectListNode->obj, &v29);
+                                        rect_min_bound(&objectRect, &v29, &objectRect);
+                                    }
 
                                     v14 = (objectListNode->obj->flags & OBJECT_LIGHT_THRU) == 0;
 

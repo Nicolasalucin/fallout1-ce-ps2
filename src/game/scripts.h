@@ -143,6 +143,9 @@ int gtime_q_add();
 int gtime_q_process(Object* obj, void* data);
 int scr_map_q_process(Object* obj, void* data);
 int new_obj_id();
+#ifdef __PS2__
+void ps2_new_obj_id_mark_dirty();
+#endif
 int scr_find_sid_from_program(Program* program);
 Object* scr_find_obj_from_program(Program* program);
 int scr_set_objs(int sid, Object* source, Object* target);

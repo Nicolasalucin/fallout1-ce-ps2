@@ -37,6 +37,10 @@
 #include "game/trait.h"
 #include "game/worldmap.h"
 #include "int/dialog.h"
+
+#ifdef PS2_DEV_SMOKE_TEST
+#include "ps2_time.h"
+#endif
 #include "plib/color/color.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
@@ -606,6 +610,25 @@ static void op_create_object_sid(Program* program)
 
     Object* object = NULL;
 
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t ps2_opc_t0 = ps2_time_us();
+    uint64_t ps2_opc_prev = ps2_opc_t0;
+    uint64_t ps2_opc_proto = 0;
+    uint64_t ps2_opc_new = 0;
+    uint64_t ps2_opc_move = 0;
+    uint64_t ps2_opc_refresh = 0;
+    uint64_t ps2_opc_scr = 0;
+    uint64_t ps2_opc_runinfo = 0;
+#define PS2_OPC_MARK(acc) \
+    do { \
+        uint64_t ps2_opc_now = ps2_time_us(); \
+        acc += ps2_opc_now - ps2_opc_prev; \
+        ps2_opc_prev = ps2_opc_now; \
+    } while (0)
+#else
+#define PS2_OPC_MARK(acc) ((void)0)
+#endif
+
     if (isLoadingGame() != 0) {
         debug_printf("\nError: attempt to Create critter in load/save-game: %s!", program->name);
         goto out;
@@ -613,14 +636,18 @@ static void op_create_object_sid(Program* program)
 
     Proto* proto;
     if (proto_ptr(pid, &proto) != -1) {
+        PS2_OPC_MARK(ps2_opc_proto);
         if (obj_new(&object, proto->fid, pid) != -1) {
+            PS2_OPC_MARK(ps2_opc_new);
             if (tile == -1) {
                 tile = 0;
             }
 
             Rect rect;
             if (obj_move_to_tile(object, tile, elevation, &rect) != -1) {
+                PS2_OPC_MARK(ps2_opc_move);
                 tile_refresh_rect(&rect, object->elevation);
+                PS2_OPC_MARK(ps2_opc_refresh);
             }
         }
     }
@@ -656,10 +683,31 @@ static void op_create_object_sid(Program* program)
         object->id = new_obj_id();
         script->scr_oid = object->id;
         script->owner = object;
+        PS2_OPC_MARK(ps2_opc_scr);
         scr_find_str_run_info(sid - 1, &(script->run_info_flags), object->sid);
+        PS2_OPC_MARK(ps2_opc_runinfo);
     };
 
 out:
+
+#ifdef PS2_DEV_SMOKE_TEST
+    {
+        uint64_t ps2_opc_total = ps2_time_us() - ps2_opc_t0;
+        if (ps2_opc_total > 20000) {
+            printf("[ps2][smoke] prof: create_object_sid pid=%d tile=%d elev=%d sid=%d: total=%u proto=%u new=%u move=%u refresh=%u scr=%u runinfo=%u us\n",
+                pid, tile, elevation, sid,
+                (unsigned int)ps2_opc_total,
+                (unsigned int)ps2_opc_proto,
+                (unsigned int)ps2_opc_new,
+                (unsigned int)ps2_opc_move,
+                (unsigned int)ps2_opc_refresh,
+                (unsigned int)ps2_opc_scr,
+                (unsigned int)ps2_opc_runinfo);
+            fflush(stdout);
+        }
+    }
+#undef PS2_OPC_MARK
+#endif
 
     programStackPushPointer(program, object);
 }
@@ -792,7 +840,17 @@ static void op_tile_contains_obj_pid(Program* program)
 // 0x44C87C
 static void op_self_obj(Program* program)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    uint64_t ps2_t0 = ps2_time_us();
     Object* object = scr_find_obj_from_program(program);
+    uint64_t ps2_dt = ps2_time_us() - ps2_t0;
+    if (ps2_dt > 20000) {
+        printf("[ps2][smoke] prof: op_self_obj slow: %u us\n", (unsigned int)ps2_dt);
+        fflush(stdout);
+    }
+#else
+    Object* object = scr_find_obj_from_program(program);
+#endif
     programStackPushPointer(program, object);
 }
 

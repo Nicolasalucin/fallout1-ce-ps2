@@ -399,12 +399,95 @@ int scr_map_q_process(Object* obj, void* data)
     return -1;
 }
 
+#ifdef __PS2__
+// The original implementation re-scans every live object (a full walk with
+// obj_find_first/obj_find_next) for each candidate id. When a map's objects
+// carry file-assigned ids, that is O(ids * world) per call and costs
+// hundreds of milliseconds on the EE. Use a bitmap of ids in use instead,
+// rebuilt from the live object list periodically and whenever objects with
+// file-assigned ids are read (see obj_read_obj -> ps2_new_obj_id_mark_dirty).
+#define PS2_NEW_OBJ_ID_BITMAP_BITS 32768
+
+static unsigned int ps2_new_obj_id_bitmap[PS2_NEW_OBJ_ID_BITMAP_BITS / 32];
+static int ps2_new_obj_id_rebuild_countdown;
+static int ps2_new_obj_id_dirty;
+
+void ps2_new_obj_id_mark_dirty()
+{
+    ps2_new_obj_id_dirty = 1;
+}
+
+static void ps2_new_obj_id_rebuild()
+{
+    memset(ps2_new_obj_id_bitmap, 0, sizeof(ps2_new_obj_id_bitmap));
+
+    Object* ptr = obj_find_first();
+    while (ptr != NULL) {
+        int id = ptr->id;
+        if (id >= 0 && id < PS2_NEW_OBJ_ID_BITMAP_BITS) {
+            ps2_new_obj_id_bitmap[id >> 5] |= 1u << (id & 31);
+        }
+
+        ptr = obj_find_next();
+    }
+}
+#endif
+
 // 0x491B60
 int new_obj_id()
 {
     // 0x51C7D4
     static int cur_id = 4;
 
+#ifdef __PS2__
+    if (ps2_new_obj_id_dirty || ps2_new_obj_id_rebuild_countdown <= 0) {
+        ps2_new_obj_id_rebuild();
+        ps2_new_obj_id_dirty = 0;
+        ps2_new_obj_id_rebuild_countdown = 128;
+    }
+
+    ps2_new_obj_id_rebuild_countdown--;
+
+    for (;;) {
+        cur_id++;
+        if (cur_id < 5) {
+            cur_id = 5;
+        }
+
+        if (cur_id >= PS2_NEW_OBJ_ID_BITMAP_BITS) {
+            break;
+        }
+
+        if ((ps2_new_obj_id_bitmap[cur_id >> 5] & (1u << (cur_id & 31))) == 0) {
+            break;
+        }
+    }
+
+    if (cur_id >= PS2_NEW_OBJ_ID_BITMAP_BITS) {
+        // Extremely unlikely; fall back to the original exhaustive scan.
+        Object* ptr;
+        do {
+            cur_id++;
+            ptr = obj_find_first();
+
+            while (ptr) {
+                if (cur_id == ptr->id) {
+                    break;
+                }
+
+                ptr = obj_find_next();
+            }
+        } while (ptr);
+    } else {
+        ps2_new_obj_id_bitmap[cur_id >> 5] |= 1u << (cur_id & 31);
+    }
+
+    if (cur_id >= 18000) {
+        debug_printf("\n    ERROR: new_obj_id() !!!! Picked PLAYER ID!!!!");
+    }
+
+    return cur_id;
+#else
     Object* ptr;
 
     do {
@@ -427,6 +510,7 @@ int new_obj_id()
     cur_id++;
 
     return cur_id;
+#endif
 }
 
 // 0x491C00
@@ -1237,9 +1321,130 @@ static int scr_build_lookup_table(Script* script)
     return 0;
 }
 
+#ifdef __PS2__
+/* PS2 port: both scr_find_str_run_info() and scr_index_to_name() used to
+ * re-open and re-read scripts.lst line by line from storage on every call.
+ * Local variable access on scripts without a "local_vars=" entry hits the
+ * former on every read/write (scr_num_local_vars stays 0), and every
+ * op_create_object_sid hits it too, so this was dozens of full list reads
+ * per map load. Parse the list once into RAM and serve both from there. */
+typedef struct Ps2ScriptsLstEntry {
+    unsigned short flags; // bit 0 - "map_init", bit 1 - "map_exit"
+    int local_vars; // "local_vars=" value, -1 when the line has none
+    char name[COMPAT_MAX_PATH]; // "name.int", empty when the line has no dot
+} Ps2ScriptsLstEntry;
+
+static Ps2ScriptsLstEntry* ps2_scripts_lst = NULL;
+static int ps2_scripts_lst_count = 0;
+static char ps2_scripts_lst_path[COMPAT_MAX_PATH];
+
+static int ps2_scripts_lst_ensure(const char* path)
+{
+    if (ps2_scripts_lst != NULL && strcmp(ps2_scripts_lst_path, path) == 0) {
+        return 0;
+    }
+
+    mem_free(ps2_scripts_lst);
+    ps2_scripts_lst = NULL;
+    ps2_scripts_lst_count = 0;
+    ps2_scripts_lst_path[0] = '\0';
+
+    DB_FILE* stream = db_fopen(path, "rt");
+    if (stream == NULL) {
+        return -1;
+    }
+
+    int capacity = 0;
+    char string[COMPAT_MAX_PATH];
+    while (db_fgets(string, sizeof(string), stream) != NULL) {
+        if (ps2_scripts_lst_count == capacity) {
+            int newCapacity = capacity != 0 ? capacity * 2 : 256;
+            ps2_scripts_lst = (Ps2ScriptsLstEntry*)mem_realloc(ps2_scripts_lst, sizeof(*ps2_scripts_lst) * newCapacity);
+            if (ps2_scripts_lst == NULL) {
+                ps2_scripts_lst_count = 0;
+                break;
+            }
+            capacity = newCapacity;
+        }
+
+        Ps2ScriptsLstEntry* entry = &(ps2_scripts_lst[ps2_scripts_lst_count]);
+        entry->flags = 0;
+        entry->local_vars = -1;
+        entry->name[0] = '\0';
+
+        // Same parsing order as the original functions: comment info first,
+        // then the file name from the part before the first dot.
+        char* sep = strchr(string, '#');
+        if (sep != NULL && sep[1] != '\0') {
+            if (strstr(sep, "map_init") != NULL) {
+                entry->flags |= 0x1;
+            }
+
+            if (strstr(sep, "map_exit") != NULL) {
+                entry->flags |= 0x2;
+            }
+
+            char* localVarsSep = strstr(sep, "local_vars=");
+            if (localVarsSep != NULL) {
+                entry->local_vars = atoi(localVarsSep + 11);
+            }
+        }
+
+        char* sep2 = strchr(string, '.');
+        if (sep2 != NULL) {
+            *sep2 = '\0';
+            snprintf(entry->name, sizeof(entry->name), "%s.%s", string, "int");
+        }
+
+        ps2_scripts_lst_count++;
+    }
+
+    db_fclose(stream);
+
+    snprintf(ps2_scripts_lst_path, sizeof(ps2_scripts_lst_path), "%s", path);
+
+    return 0;
+}
+#endif
+
 // 0x492DEC
 int scr_find_str_run_info(int scr_script_idx, int* run_info_flags, int sid)
 {
+#ifdef __PS2__
+    if (scr_script_idx < 0) {
+        return -1;
+    }
+
+    if (run_info_flags == NULL) {
+        return -1;
+    }
+
+    char path[COMPAT_MAX_PATH];
+    script_make_path(path);
+    strcat(path, "scripts.lst");
+
+    if (ps2_scripts_lst_ensure(path) == -1) {
+        return -1;
+    }
+
+    if (scr_script_idx >= ps2_scripts_lst_count) {
+        return -1;
+    }
+
+    Ps2ScriptsLstEntry* entry = &(ps2_scripts_lst[scr_script_idx]);
+    *run_info_flags |= entry->flags;
+
+    if (entry->local_vars >= 0) {
+        Script* script;
+        if (scr_ptr(sid, &script) != -1) {
+            script->scr_num_local_vars = entry->local_vars;
+        } else {
+            return -1;
+        }
+    }
+
+    return 0;
+#else
     int rc = -1;
     char path[COMPAT_MAX_PATH];
     DB_FILE* stream;
@@ -1298,11 +1503,41 @@ int scr_find_str_run_info(int scr_script_idx, int* run_info_flags, int sid)
     db_fclose(stream);
 
     return rc;
+#endif
 }
 
 // 0x492FC4
 static int scr_index_to_name(int scr_script_idx, char* name, size_t size)
 {
+#ifdef __PS2__
+    if (scr_script_idx < 0) {
+        return -1;
+    }
+
+    if (name == NULL) {
+        return -1;
+    }
+
+    char path[COMPAT_MAX_PATH];
+    script_make_path(path);
+    strcat(path, "scripts.lst");
+
+    if (ps2_scripts_lst_ensure(path) == -1) {
+        return -1;
+    }
+
+    if (scr_script_idx >= ps2_scripts_lst_count) {
+        return -1;
+    }
+
+    Ps2ScriptsLstEntry* entry = &(ps2_scripts_lst[scr_script_idx]);
+    if (entry->name[0] == '\0') {
+        return -1;
+    }
+
+    snprintf(name, size, "%s", entry->name);
+    return 0;
+#else
     int rc = -1;
     char path[COMPAT_MAX_PATH];
     DB_FILE* stream;
@@ -1344,6 +1579,7 @@ static int scr_index_to_name(int scr_script_idx, char* name, size_t size)
     db_fclose(stream);
 
     return rc;
+#endif
 }
 
 // 0x492FBC

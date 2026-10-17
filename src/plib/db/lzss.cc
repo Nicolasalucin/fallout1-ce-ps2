@@ -34,97 +34,144 @@ static unsigned char* decode_buffer_end;
 static unsigned char ring_buffer[4116];
 
 // 0x4CA260
+//
+// NOTE (PS2): The original implementation calls a small helper per decoded
+// chunk and re-applies the ring buffer wrap masks on every byte. This is a
+// behavior-preserving rewrite: the same `length` accounting (consumed input
+// bytes), the same decode_buffer refill points and the same stop checks are
+// kept, but match copies take a wrap-free fast path (no per-byte masking) and
+// the chunk bodies are inlined.
+#define LZSS_DECODE_TO_BUF_CHUNK(bit_mask) \
+    do { \
+        if ((byte & (bit_mask)) != 0) { \
+            len -= 1; \
+            unsigned char b = *decode_buffer_position++; \
+            *curr++ = b; \
+            ring_buffer[ring_buffer_index] = b; \
+            ring_buffer_index = (ring_buffer_index + 1) & 0xFFF; \
+        } else { \
+            len -= 2; \
+            unsigned char low = *decode_buffer_position++; \
+            unsigned char high = *decode_buffer_position++; \
+            int dict_offset = low | ((high & 0xF0) << 4); \
+            int chunk_length = (high & 0x0F) + 3; \
+            if (dict_offset + chunk_length <= 4096 && ring_buffer_index + chunk_length <= 4096) { \
+                unsigned char* rs = &ring_buffer[dict_offset]; \
+                unsigned char* rd = &ring_buffer[ring_buffer_index]; \
+                for (int k = 0; k < chunk_length; k++) { \
+                    unsigned char b = rs[k]; \
+                    rd[k] = b; \
+                    *curr++ = b; \
+                } \
+                ring_buffer_index = (ring_buffer_index + chunk_length) & 0xFFF; \
+            } else { \
+                for (int k = 0; k < chunk_length; k++) { \
+                    unsigned char b = ring_buffer[dict_offset]; \
+                    dict_offset = (dict_offset + 1) & 0xFFF; \
+                    ring_buffer[ring_buffer_index] = b; \
+                    ring_buffer_index = (ring_buffer_index + 1) & 0xFFF; \
+                    *curr++ = b; \
+                } \
+            } \
+        } \
+    } while (0)
+
 int lzss_decode_to_buf(FILE* in, unsigned char* dest, unsigned int length)
 {
     unsigned char* curr;
+    unsigned int len;
     unsigned char byte;
 
     curr = dest;
+    len = length;
+
     memset(ring_buffer, ' ', 4078);
     ring_buffer_index = 4078;
     decode_buffer_end = decode_buffer;
     decode_buffer_position = decode_buffer;
     decode_bytes_left = length;
 
-    while (length > 16) {
+    while (len > 16) {
         lzss_fill_decode_buffer(in);
 
-        length -= 1;
+        len -= 1;
         byte = *decode_buffer_position++;
-        lzss_decode_chunk_to_buf(byte & 0x01, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x02, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x04, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x08, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x10, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x20, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x40, &curr, &length);
-        lzss_decode_chunk_to_buf(byte & 0x80, &curr, &length);
+        LZSS_DECODE_TO_BUF_CHUNK(0x01);
+        LZSS_DECODE_TO_BUF_CHUNK(0x02);
+        LZSS_DECODE_TO_BUF_CHUNK(0x04);
+        LZSS_DECODE_TO_BUF_CHUNK(0x08);
+        LZSS_DECODE_TO_BUF_CHUNK(0x10);
+        LZSS_DECODE_TO_BUF_CHUNK(0x20);
+        LZSS_DECODE_TO_BUF_CHUNK(0x40);
+        LZSS_DECODE_TO_BUF_CHUNK(0x80);
     }
 
     do {
-        if (length == 0) break;
+        if (len == 0) break;
 
         lzss_fill_decode_buffer(in);
 
-        length -= 1;
+        len -= 1;
         byte = *decode_buffer_position++;
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x01, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x01);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x02, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x02);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x04, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x04);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x08, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x08);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x10, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x10);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x20, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x20);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x40, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x40);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x80, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x80);
 
-        if (length == 0) break;
+        if (len == 0) break;
 
-        length -= 1;
+        len -= 1;
         byte = *decode_buffer_position++;
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x01, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x01);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x02, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x02);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x04, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x04);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x08, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x08);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x10, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x10);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x20, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x20);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x40, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x40);
 
-        if (length == 0) break;
-        lzss_decode_chunk_to_buf(byte & 0x80, &curr, &length);
+        if (len == 0) break;
+        LZSS_DECODE_TO_BUF_CHUNK(0x80);
     } while (0);
 
     return curr - dest;
 }
+
+#undef LZSS_DECODE_TO_BUF_CHUNK
 
 // 0x4CB570
 void lzss_decode_to_file(FILE* in, FILE* out, unsigned int length)
