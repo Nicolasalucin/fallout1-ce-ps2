@@ -49,6 +49,8 @@ Huge thanks to:
 - **fallout1-ce / fallout2-ce contributors** — see the upstream repositories.
 - **PS2SDK / ps2dev / gsKit authors and community** — for the toolchain,
   drivers and libraries that make PS2 homebrew possible.
+  ### AI Assistance & Tooling
+- **AI-Assisted Porting:** Developed and maintained by Nicolas Alucin using AI coding assistance ([OpenCode](https://github.com/opencode-ai) / LLMs) under human technical direction for low-level architecture, memory profiling, and platform abstraction.
 
 ## Legal / no game assets
 
@@ -259,6 +261,8 @@ Gracias infinitas a:
 - **Colaboradores de fallout1-ce / fallout2-ce** — ver repos upstream.
 - **Comunidad ps2dev / PS2SDK / gsKit** — por el toolchain, drivers y
   librerías que hacen posible el homebrew de PS2.
+  ### Asistencia de IA y Herramientas
+- **Desarrollo asistido por IA:** Port diseñado y mantenido por Nicolas Alucin con asistencia de herramientas de IA (OpenCode / LLMs) bajo dirección técnica humana para la implementación de bajo nivel, gestión de memoria RDRAM y abstracción de plataforma para PS2.
 
 ## Legal / sin assets del juego
 
