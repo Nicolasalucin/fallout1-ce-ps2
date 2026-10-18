@@ -4,25 +4,33 @@
  * Polls port 0 with libpad and translates the pad state into the SDL shim's
  * synthetic event stream (relative mouse motion + mouse buttons + keys).
  *
- * Approved mapping (see README):
+ * Approved F8 mapping (see README):
  *
  *   Left stick   cursor, smooth acceleration curve
  *   Right stick  scroll wheel
  *   D-pad        arrow keys
  *   Cross        left click
  *   Circle       right click / interact
- *   Triangle     automap (Tab)
- *   Square       change active hand (B)
- *   L1           weapon attack mode / reload (N)
- *   R1           Pip-Boy (P)
- *   L2           inventory (I)
- *   R2           end turn / skip dialog (Space)
+ *   Square       inventory (I)
+ *   Triangle     character sheet (C)
+ *   Select       Pip-Boy (P)
  *   Start        main menu / close (Escape)
- *   Select       character screen (C)
+ *   L1           change active hand (B)
+ *   L2           cycle item/weapon mode (N)
+ *   R1           attack / enter combat (A); end-combat attempt (Return)
+ *                while a battle is running
+ *   R2           end turn / skip dialog (Space)
+ *   R3           automap (Tab)
+ *   L3           toggle the on-screen keyboard
+ *
+ * The on-screen keyboard (ps2_osk.c) is modal: while it is open the whole
+ * pad feeds its grid (D-pad/stick move, Cross types, Square backspaces,
+ * Start submits, Circle cancels) and no binding fires.
  */
 
 #include "ps2_input.h"
 
+#include "ps2_osk.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
 
@@ -67,14 +75,15 @@ static const InputBinding s_bindings[] = {
     { PAD_RIGHT, ACT_KEY, SDL_SCANCODE_RIGHT, "RIGHT" },
     { PAD_CROSS, ACT_MOUSE, SDL_BUTTON_LEFT, "CROSS" },
     { PAD_CIRCLE, ACT_MOUSE, SDL_BUTTON_RIGHT, "CIRCLE" },
-    { PAD_TRIANGLE, ACT_KEY, SDL_SCANCODE_TAB, "TRIANGLE" },
-    { PAD_SQUARE, ACT_KEY, SDL_SCANCODE_B, "SQUARE" },
-    { PAD_L1, ACT_KEY, SDL_SCANCODE_N, "L1" },
-    { PAD_R1, ACT_KEY, SDL_SCANCODE_P, "R1" },
-    { PAD_L2, ACT_KEY, SDL_SCANCODE_I, "L2" },
-    { PAD_R2, ACT_KEY, SDL_SCANCODE_SPACE, "R2" },
+    { PAD_SQUARE, ACT_KEY, SDL_SCANCODE_I, "SQUARE" },
+    { PAD_TRIANGLE, ACT_KEY, SDL_SCANCODE_C, "TRIANGLE" },
+    { PAD_SELECT, ACT_KEY, SDL_SCANCODE_P, "SELECT" },
     { PAD_START, ACT_KEY, SDL_SCANCODE_ESCAPE, "START" },
-    { PAD_SELECT, ACT_KEY, SDL_SCANCODE_C, "SELECT" },
+    { PAD_L1, ACT_KEY, SDL_SCANCODE_B, "L1" },
+    { PAD_L2, ACT_KEY, SDL_SCANCODE_N, "L2" },
+    { PAD_R1, ACT_KEY, SDL_SCANCODE_A, "R1" },
+    { PAD_R2, ACT_KEY, SDL_SCANCODE_SPACE, "R2" },
+    { PAD_R3, ACT_KEY, SDL_SCANCODE_TAB, "R3" },
 };
 #define NUM_BINDINGS ((int)(sizeof(s_bindings) / sizeof(s_bindings[0])))
 
@@ -93,6 +102,7 @@ static float s_cursor_x;
 static float s_cursor_y;
 static float s_wheel_x;
 static float s_wheel_y;
+static int s_r1_code = SDL_SCANCODE_A;
 
 void ps2_input_init(void)
 {
@@ -146,6 +156,22 @@ static float cursor_speed(float axis)
     return axis * factor * CURSOR_MAX_SPEED;
 }
 
+/* Resolve the SDL code a binding emits for a press or release. R1 is
+ * context sensitive: 'a' attacks (enters combat mode) outside a battle,
+ * Return is the end-combat attempt inside one. The code is latched on
+ * press so the matching release always uses the same key. */
+static int binding_code(const InputBinding* b, int down)
+{
+    if (b->pad_bit == PAD_R1) {
+        if (down) {
+            s_r1_code = ps2_platform_in_combat() ? SDL_SCANCODE_RETURN : SDL_SCANCODE_A;
+        }
+        return s_r1_code;
+    }
+
+    return b->code;
+}
+
 static void release_all(void)
 {
     int i;
@@ -160,7 +186,7 @@ static void release_all(void)
             continue;
         }
         if (b->kind == ACT_KEY) {
-            ps2_sdl_post_key(b->code, 0);
+            ps2_sdl_post_key(binding_code(b, 0), 0);
         } else {
             ps2_sdl_post_mouse_button(b->code, 0);
         }
@@ -183,7 +209,7 @@ static void process_buttons(u16 pressed)
         }
 
         if (b->kind == ACT_KEY) {
-            ps2_sdl_post_key(b->code, now);
+            ps2_sdl_post_key(binding_code(b, now), now);
         } else {
             ps2_sdl_post_mouse_button(b->code, now);
         }
@@ -192,6 +218,27 @@ static void process_buttons(u16 pressed)
     }
 
     s_prev_buttons = pressed;
+}
+
+/* Route one pad sample: the OSK swallows the whole pad while open, L3
+ * toggles it, everything else runs through the normal bindings. */
+static void handle_pad_state(u16 pressed, int lx, int ly, u32 now)
+{
+    if (ps2_osk_is_open()) {
+        ps2_osk_input(pressed, lx, ly, now);
+        s_vel_x = 0.0f;
+        s_vel_y = 0.0f;
+        s_prev_buttons = pressed;
+        return;
+    }
+
+    if ((pressed & PAD_L3) != 0 && (s_prev_buttons & PAD_L3) == 0) {
+        ps2_osk_open();
+        s_prev_buttons = pressed;
+        return;
+    }
+
+    process_buttons(pressed);
 }
 
 static void process_sticks(const struct padButtonStatus* status, u32 now)
@@ -285,6 +332,35 @@ static void log_raw_change(const struct padButtonStatus* status)
         status->ljoy_h, status->ljoy_v, status->rjoy_h, status->rjoy_v);
 }
 
+#ifdef PS2_DEV_SMOKE_TEST
+/* F8 smoke hooks: the pad path (bindings + OSK) driven without hardware.
+ * The injected mask uses the same active-high PAD_* layout.
+ * ps2_input_smoke_release() keeps injection active for one more poll
+ * with buttons==0 so s_prev_buttons in both input_pad.c and ps2_osk.c
+ * always resets to 0 between consecutive identical button taps. */
+static int s_inject_active;
+static int s_inject_release_pending;
+static u16 s_inject_buttons;
+
+void ps2_input_smoke_press(unsigned int buttons)
+{
+    s_inject_buttons = (u16)buttons;
+    s_inject_release_pending = 0;
+    s_inject_active = 1;
+}
+
+void ps2_input_smoke_release(void)
+{
+    s_inject_buttons = 0;
+    s_inject_release_pending = 1;
+}
+
+int ps2_input_smoke_release_pending(void)
+{
+    return s_inject_release_pending;
+}
+#endif
+
 void ps2_input_poll(void)
 {
     struct padButtonStatus status;
@@ -292,15 +368,38 @@ void ps2_input_poll(void)
     int state;
     u16 pressed;
 
-    if (!s_pad_ready) {
-        return;
-    }
-
     now = ps2_time_ms();
     if (now == s_last_poll) {
         return; /* at most one hardware probe per ms */
     }
     s_last_poll = now;
+
+#ifdef PS2_DEV_SMOKE_TEST
+    if (s_inject_active) {
+        /* Smoke-driven sample: ignores the hardware entirely. */
+        u16 injected = s_inject_buttons;
+
+        if (s_first_read) {
+            s_first_read = 0;
+            s_prev_buttons = injected;
+        } else {
+            handle_pad_state(injected, 128, 128, now);
+        }
+        s_prev_buttons = injected;
+        s_vel_x = 0.0f;
+        s_vel_y = 0.0f;
+
+        if (s_inject_release_pending) {
+            s_inject_release_pending = 0;
+            s_inject_active = 0;
+        }
+        return;
+    }
+#endif
+
+    if (!s_pad_ready) {
+        return;
+    }
 
     state = padGetState(PAD_PORT, PAD_SLOT);
     if (state != PAD_STATE_STABLE) {
@@ -355,8 +454,10 @@ void ps2_input_poll(void)
         s_first_read = 0;
         s_prev_buttons = pressed;
     } else {
-        process_buttons(pressed);
+        handle_pad_state(pressed, status.ljoy_h, status.ljoy_v, now);
     }
 
-    process_sticks(&status, now);
+    if (!ps2_osk_is_open()) {
+        process_sticks(&status, now);
+    }
 }

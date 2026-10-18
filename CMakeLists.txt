@@ -310,6 +310,7 @@ if(PS2)
         "src/platform/ps2/ps2_mem.c"
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
+        "src/platform/ps2/ps2_osk.c"
         "src/platform/ps2/fs.c"
         "src/platform/ps2/ps2_save.c"
         "src/platform/ps2/audio_audsrv.c"
@@ -379,6 +380,7 @@ if(PS2)
         src/platform/ps2/ps2_mem.c
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
+        src/platform/ps2/ps2_osk.c
         src/platform/ps2/fs.c
         src/platform/ps2/audio_audsrv.c
         src/platform/ps2/platform_compat_ps2.cc

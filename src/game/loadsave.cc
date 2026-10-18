@@ -1900,6 +1900,10 @@ static int GetSlotList()
                 }
             } else {
                 LSstatus[index] = SLOT_STATE_OCCUPIED;
+#ifdef PS2_DEV_SMOKE_TEST
+                printf("[ps2][smoke] loadsave: slot %d listed as '%s'\n", index + 1, LSData[index].description);
+                fflush(stdout);
+#endif
             }
 
             db_fclose(flptr);
@@ -2164,6 +2168,10 @@ static int GetComment(int a1)
     int rc;
 
     if (get_input_str2(window, 507, 508, description, LOAD_SAVE_DESCRIPTION_LENGTH - 1, 24, 35, colorTable[992], lsbmp[LOAD_SAVE_FRM_BOX][ginfo[1].width * 35 + 24], 0) == 0) {
+#ifdef PS2_DEV_SMOKE_TEST
+        printf("[ps2][smoke] loadsave: name '%s' accepted for slot %d\n", description, a1 + 1);
+        fflush(stdout);
+#endif
         strncpy(LSData[a1].description, description, LOAD_SAVE_DESCRIPTION_LENGTH);
         LSData[a1].description[LOAD_SAVE_DESCRIPTION_LENGTH - 1] = '\0';
         rc = 1;

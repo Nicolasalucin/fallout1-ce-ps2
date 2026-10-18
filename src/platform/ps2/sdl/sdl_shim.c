@@ -26,6 +26,8 @@
 #include "SDL.h"
 #include "ps2_sdl_internal.h"
 
+#include "../ps2_osk.h"
+
 #include <ctype.h>
 #include <malloc.h>
 #include <stdio.h>
@@ -798,11 +800,16 @@ int SDL_SetRelativeMouseMode(SDL_bool enabled)
 void SDL_StartTextInput(void)
 {
     s_text_input_active = 1;
+
+    /* F8: the engine just enabled an editable text widget (save-name
+     * prompt, editor, file dialogs); summon the on-screen keyboard. */
+    ps2_osk_open();
 }
 
 void SDL_StopTextInput(void)
 {
     s_text_input_active = 0;
+    ps2_osk_close();
 }
 
 /* ---------------------------------------------------------------------- */

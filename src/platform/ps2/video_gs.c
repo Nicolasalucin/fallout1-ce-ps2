@@ -22,6 +22,7 @@
 
 #include "ps2_video.h"
 #include "ps2_time.h"
+#include "ps2_osk.h"
 #include "sdl/ps2_sdl_internal.h"
 
 #include <stdint.h>
@@ -163,6 +164,13 @@ void ps2_video_present(const void* pixels, int width, int height, int pitch)
         for (int i = 0; i < PS2_SCR_W * PS2_SCR_H; i++) {
             dst[i] = lut[indices[i]];
         }
+
+        /* F8: composite the on-screen keyboard over the freshly built
+         * frame (engine buffers untouched; no-op while closed). */
+        if (ps2_osk_is_open()) {
+            ps2_osk_render(s_fb_rgba, PS2_SCR_W, PS2_SCR_H);
+        }
+
         s_texture.Mem = (u32*)s_fb_rgba;
 
         /* Write back the freshly built frame before the GIF DMAC fetches it

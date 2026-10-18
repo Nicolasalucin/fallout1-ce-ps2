@@ -70,7 +70,7 @@ Work in progress (native port under construction):
 - [x] F5 — Audio: audsrv streaming (ACM music / voices / SFX), mixed on a dedicated EE thread
 - [x] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + slot icons; auto-named saves (on-screen keyboard deferred to F8)
 - [x] F7 — Memory: heap audit + capped caches (no arena allocator needed); world-tour / dialogue / combat stress with heap watermarks under 32 MB RDRAM
-- [ ] F8 — Mod loader + boot menu + on-screen keyboard (save naming)
+- [x] F8 — On-screen keyboard (save naming) + DualShock 2 ergonomic mapping; pad hotkey dispatch verified
 - [ ] F9 — Hardware hardening (USB / MX4SIO / HDD)
 
 ---
@@ -155,15 +155,17 @@ The result is `fallout1-ce.elf` in the repository root. Copy it to your
 | Right stick | Scroll wheel (lists / world map) |
 | ✕ Cross | Left click / confirm |
 | ○ Circle | Right click / interact |
-| □ Square | Change active hand (B) |
-| △ Triangle | Automap (Tab) |
-| L1 | Attack mode / reload (N) |
-| R1 | Pip-Boy (P) |
-| L2 | Inventory (I) |
-| R2 | End turn / skip dialog (Space) |
-| D-Pad | Arrow keys (move / navigate) |
+| □ Square | Inventory (I) |
+| △ Triangle | Character sheet (C) |
+| SELECT | Pip-Boy (P) |
 | START | Game menu (Esc) |
-| SELECT | Character sheet (C) |
+| L1 | Change active hand (B) |
+| L2 | Cycle item / weapon mode (N) |
+| R1 | Attack / enter combat (A); end-combat attempt (Return) in battle |
+| R2 | End turn / skip dialog (Space) |
+| R3 | Automap (Tab) |
+| L3 | Toggle on-screen keyboard |
+| D-Pad | Arrow keys (move / navigate) |
 
 ## Saving
 
@@ -256,7 +258,7 @@ Trabajo en curso (port nativo en construcción):
 - [x] F6 — Guardados en tarjeta de memoria (`mc0:/FALLOUT1_Sxx`) + iconos por
   ranura; nombre automático (teclado en pantalla para nombrar pospuesto a F8)
 - [x] F7 — Memoria: auditoría de heap + cachés con tope (sin asignador de arena); stress world-tour / diálogo / combate con watermarks bajo los 32 MB de RDRAM
-- [ ] F8 — Cargador de mods + menú de arranque + teclado en pantalla (nombre de guardado)
+- [x] F8 — Teclado en pantalla (nombre de guardado) + mapeo ergonómico DualShock 2; despacho de atajos de pad verificado
 - [ ] F9 — Robustez en hardware real (USB / MX4SIO / HDD)
 
 ## Bring Your Own Game (usa tus propios datos)
@@ -337,15 +339,17 @@ El resultado es `fallout1-ce.elf` en la raíz del repositorio. Cópialo a
 | Stick derecho | Rueda de scroll (listas / mapa del mundo) |
 | ✕ Cruz | Clic izquierdo / confirmar |
 | ○ Círculo | Clic derecho / interactuar |
-| □ Cuadrado | Cambiar mano activa (B) |
-| △ Triángulo | Automapa (Tab) |
-| L1 | Modo de ataque / recarga (N) |
-| R1 | Pip-Boy (P) |
-| L2 | Inventario (I) |
-| R2 | Fin de turno / saltar diálogo (Espacio) |
-| D-Pad | Flechas (moverse / navegar) |
+| □ Cuadrado | Inventario (I) |
+| △ Triángulo | Hoja de personaje (C) |
+| SELECT | Pip-Boy (P) |
 | START | Menú del juego (Esc) |
-| SELECT | Hoja de personaje (C) |
+| L1 | Cambiar mano activa (B) |
+| L2 | Ciclar modo de arma / objeto (N) |
+| R1 | Atacar / entrar en combate (A); intentar fin de combate (Return) en batalla |
+| R2 | Fin de turno / saltar diálogo (Espacio) |
+| R3 | Automapa (Tab) |
+| L3 | Alternar teclado en pantalla |
+| D-Pad | Flechas (moverse / navegar) |
 
 ## Guardado
 

@@ -21,6 +21,8 @@
 #include "ps2_save.h"
 #include "ps2_time.h"
 
+#include "game/combat.h"
+
 namespace fallout {
 
 int compat_stricmp(const char* string1, const char* string2)
@@ -324,6 +326,14 @@ long getFileSize(FILE* stream)
     long filesize = ftell(stream);
     fseek(stream, originalOffset, SEEK_SET);
     return filesize;
+}
+
+// F8: bridge for the context-sensitive R1 mapping (input_pad.c decides
+// between attack and end-combat attempt). C linkage so the plain-C
+// platform layer can call it; reads a global, safe before boot.
+extern "C" int ps2_platform_in_combat(void)
+{
+    return isInCombat() ? 1 : 0;
 }
 
 } // namespace fallout

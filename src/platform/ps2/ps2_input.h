@@ -20,6 +20,23 @@ void ps2_input_init(void);
  * the pad is only actually polled once per frame internally). */
 void ps2_input_poll(void);
 
+/* Engine-side bridge (implemented in platform_compat_ps2.cc): 1 while a
+ * turn-based battle is running. Used for the F8 context-sensitive R1
+ * mapping (attack outside combat, end-combat attempt inside). Reads only
+ * a global, so it is safe before the engine boots. */
+int ps2_platform_in_combat(void);
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* F8 smoke hooks: drive the pad path on the real ELF without hardware.
+ * `buttons` uses the same active-high PAD_* layout the libpad path uses;
+ * release() falls back to the real pad. */
+void ps2_input_smoke_press(unsigned int buttons);
+void ps2_input_smoke_release(void);
+/* 1 while a release sample (buttons==0) is queued but has not been polled
+ * yet: a new press would overwrite it and merge two identical taps. */
+int ps2_input_smoke_release_pending(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

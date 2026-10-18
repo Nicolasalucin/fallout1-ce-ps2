@@ -65,6 +65,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libpad.h>
+#include <stdint.h>
+#include <cmath>
+
+extern "C" {
+/* TEMP profiling counters (F5.2 map load, see fs.c). */
+extern unsigned int ps2_fs_stat_fopen_calls;
+extern unsigned int ps2_fs_stat_canonicalize_calls;
+extern void ps2_fs_stat_reset(void);
+}
 
 #include "game/art.h"
 #include "game/combat.h"
@@ -94,19 +104,45 @@
 #include "plib/gnw/mouse.h"
 #include "plib/gnw/svga.h"
 #include "platform_compat.h"
+#include "ps2_input.h"
 #include "ps2_mem.h"
+#include "ps2_osk.h"
 #include "ps2_save.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
 
-extern "C" {
-/* TEMP profiling counters (F5.2 map load, see fs.c). */
-extern unsigned int ps2_fs_stat_fopen_calls;
-extern unsigned int ps2_fs_stat_canonicalize_calls;
-extern void ps2_fs_stat_reset(void);
-}
+/* F7 memory probes (see plib/gnw/memory.cc, smoke builds only). */
 
 namespace fallout {
+#include "game/gmouse.h"
+#include "game/gsound.h"
+#include "game/intface.h"
+#include "game/loadsave.h"
+#include "game/mainmenu.h"
+#include "game/game_vars.h"
+#include "game/map.h"
+#include "game/object.h"
+#include "game/palette.h"
+#include "game/proto.h"
+#include "game/protinst.h"
+#include "game/roll.h"
+#include "game/scripts.h"
+#include "game/select.h"
+#include "game/tile.h"
+#include "game/worldmap.h"
+#include "plib/color/color.h"
+#include "plib/db/db.h"
+#include "plib/gnw/gnw.h"
+#include "plib/gnw/input.h"
+#include "plib/gnw/mouse.h"
+#include "plib/gnw/svga.h"
+#include "platform_compat.h"
+#include "ps2_input.h"
+#include "ps2_mem.h"
+#include "ps2_osk.h"
+#include "ps2_save.h"
+#include "ps2_time.h"
+#include "sdl/ps2_sdl_internal.h"
 
 /* F7 memory probes (see plib/gnw/memory.cc, smoke builds only). */
 int ps2_mem_engine_cur_kb(void);
@@ -147,12 +183,26 @@ extern unsigned int ps2_lips_play_count;
 #define SMOKE_CBT_DRIVE_MS 2500
 #define SMOKE_CBT_CLICK_TRIES 5
 
+/* State 13 - pad hotkey dispatch (F8). */
+#define SMOKE_HK_DETECT_MS 700
+#define SMOKE_HK_CLOSE_MS 800
+#define SMOKE_HK_MAX_MS 6000
+
+/* State 9 - OSK save name typing (F8). ~50 pad events, 200ms each. */
+#define SMOKE_OSK_EVENTS 64
+#define SMOKE_OSK_EVENT_MS 200
+
 /* Scripted synthetic input (see smoke_script_arm). Keep in sync with the
- * widest single-screen sequence (the preferences slider drags). */
-#define SMOKE_SCRIPT_MAX 6
+ * widest single-screen sequence (the F8 OSK save-name typing, which has to
+ * navigate the whole 10x4 grid with D-pad taps). */
+#define SMOKE_SCRIPT_MAX 128
 
 /* Frontend per-screen deadline. */
 #define SMOKE_FRONTEND_STEP_MS 20000
+/* The OSK save-name script is long and paced (a pressed/released pad sample
+ * costs one pump each at low dialog frame rates), so it needs a wider
+ * margin than a plain menu screen. */
+#define SMOKE_OSK_DEADLINE_MS 60000
 
 typedef enum SmokeState {
     SMOKE_STATE_MAP_VERIFY,
@@ -167,6 +217,7 @@ typedef enum SmokeState {
     SMOKE_STATE_WORLD_TOUR,
     SMOKE_STATE_DIALOGUE,
     SMOKE_STATE_COMBAT,
+    SMOKE_STATE_PAD_HOTKEYS,
     SMOKE_STATE_VERDICT,
 } SmokeState;
 
@@ -283,6 +334,12 @@ static unsigned int s_cbt_start;
 static unsigned int s_cbt_last_drive;
 static bool s_combat_ok;
 
+/* F8 pad hotkeys. */
+static int s_hk_step;
+static unsigned int s_hk_start;
+static int s_hk_ok_count;
+static unsigned int s_hk_frames_at_tap;
+
 /* ---- Scripted synthetic input ----
  *
  * A small timed script drives the frontend screens and the modal in-game UI
@@ -295,12 +352,13 @@ static bool s_combat_ok;
 typedef enum SmokeScriptKind {
     SMOKE_SCRIPT_KEY,
     SMOKE_SCRIPT_CLICK,
+    SMOKE_SCRIPT_PAD,
 } SmokeScriptKind;
 
 typedef struct SmokeScriptEntry {
     unsigned int at;
     int kind;
-    int a; // KEY: SDL scancode; CLICK: target screen x
+    int a; // KEY: SDL scancode; CLICK: target screen x; PAD: PAD_* bit mask
     int b; // CLICK: target screen y
 } SmokeScriptEntry;
 
@@ -343,6 +401,8 @@ static const char* smoke_state_name(SmokeState state)
         return "dialogue";
     case SMOKE_STATE_COMBAT:
         return "combat";
+    case SMOKE_STATE_PAD_HOTKEYS:
+        return "pad-hotkeys";
     case SMOKE_STATE_VERDICT:
         return "verdict";
     }
@@ -371,6 +431,27 @@ static void smoke_key_tap_finish(unsigned int now)
     }
 }
 
+/* F8 synthetic pad tap: press through the real pad path (bindings + OSK)
+ * via the input layer's smoke injection, release shortly after. This is
+ * the only path that can drive the on-screen keyboard from the suite. */
+static int s_pad_tap_buttons = 0;
+static unsigned int s_pad_tap_release_at = 0;
+
+static void smoke_pad_tap(unsigned int buttons, unsigned int now)
+{
+    ps2_input_smoke_press(buttons);
+    s_pad_tap_buttons = (int)buttons;
+    s_pad_tap_release_at = now + 60;
+}
+
+static void smoke_pad_tap_finish(unsigned int now)
+{
+    if (s_pad_tap_buttons != 0 && (int)(now - s_pad_tap_release_at) >= 0) {
+        ps2_input_smoke_release();
+        s_pad_tap_buttons = 0;
+    }
+}
+
 /* Arms a new timed input script (replaces any previous one). */
 static void smoke_script_arm(unsigned int now, const SmokeScriptEntry* entries, int count)
 {
@@ -389,6 +470,11 @@ static void smoke_script_clear(void)
     s_script_count = 0;
     s_script_next = 0;
     s_click_state = 0;
+
+    if (s_pad_tap_buttons != 0) {
+        ps2_input_smoke_release();
+        s_pad_tap_buttons = 0;
+    }
 }
 
 static bool smoke_script_done(void)
@@ -425,10 +511,22 @@ static void smoke_script_tick(unsigned int now)
         return;
     }
 
+    /* Pace pad taps: the injector must have delivered the previous release
+     * (buttons==0) to a poll before a new press is applied, otherwise the
+     * press overwrites the pending release and two identical taps merge
+     * into one held direction (the OSK then loses a nav step). */
+    if (entry->kind == SMOKE_SCRIPT_PAD) {
+        if (s_pad_tap_buttons != 0 || ps2_input_smoke_release_pending()) {
+            return;
+        }
+    }
+
     s_script_next++;
 
     if (entry->kind == SMOKE_SCRIPT_KEY) {
         smoke_key_tap(entry->a, now);
+    } else if (entry->kind == SMOKE_SCRIPT_PAD) {
+        smoke_pad_tap((unsigned int)entry->a, now);
     } else {
         int mx;
         int my;
@@ -454,6 +552,54 @@ static void smoke_mem_probe(const char* tag)
 {
     ps2_mem_report(tag);
     ps2_mem_engine_report(tag);
+}
+
+/* Build the OSK script programmatically from the 4x10 grid. */
+static void build_osk_script(unsigned int now, const char* target)
+{
+    static const char kGrid[4][11] = {
+        "ABCDEFGHIJ",
+        "KLMNOPQRST",
+        "UVWXYZ0123",
+        "456789_-. ",
+    };
+
+    static SmokeScriptEntry seq[128];
+    int n = 0;
+    unsigned int t = 2500;
+
+    /* 1. Press RETURN to select Slot 1 and open comment box. */
+    seq[n++] = { t, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RETURN, 0 };
+    t += 700; /* Wait for get_input_str2 -> SDL_StartTextInput -> ps2_osk_open. */
+
+    /* 2. Clear any pre-filled description with 14 backspaces (PAD_SQUARE). */
+    for (int i = 0; i < 14; ++i) {
+        seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_SQUARE, 0 };
+        t += 160;
+    }
+
+    /* 3. Navigate from (0,0) and type each character of target. */
+    int cur_r = 0, cur_c = 0;
+    for (const char* p = target; *p; ++p) {
+        int tr = -1, tc = -1;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 10; ++c) {
+                if (kGrid[r][c] == *p) { tr = r; tc = c; break; }
+            }
+            if (tr >= 0) break;
+        }
+        while (cur_r < tr) { seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_DOWN, 0 };  t += 160; cur_r++; }
+        while (cur_r > tr) { seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_UP, 0 };    t += 160; cur_r--; }
+        while (cur_c < tc) { seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_RIGHT, 0 }; t += 160; cur_c++; }
+        while (cur_c > tc) { seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_LEFT, 0 };  t += 160; cur_c--; }
+        seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_CROSS, 0 };
+        t += 160;
+    }
+
+    /* 4. Submit with PAD_START. */
+    seq[n++] = { t, SMOKE_SCRIPT_PAD, PAD_START, 0 };
+
+    smoke_script_arm(now, seq, n);
 }
 
 /* Known voiced-head NPCs (proto name prefixes, case-insensitive): Killian
@@ -1207,7 +1353,7 @@ static void smoke_run_pending(unsigned int now)
         SMOKE_LOG("perf: suite %u ms, %u top-level frames, worst frame gap %u ms (%s)",
             now - s_suite_start, s_frames, s_worst_gap, smoke_state_name(s_worst_gap_state));
 
-        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=%s world-tour=%s dialogue=%s combat=%s",
+        SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=%s world-tour=%s dialogue=%s combat=%s hotkeys=%s",
             s_fe_credits ? "ok" : "skip",
             s_fe_load ? "ok" : "skip",
             s_fe_newgame ? "ok" : "skip",
@@ -1215,7 +1361,8 @@ static void smoke_run_pending(unsigned int now)
             SMOKE_STREAM_MAP, s_save_load_ok ? "ok" : "skip",
             s_world_tour_ok ? "ok" : "skip",
             s_dialogue_ok ? "ok" : "skip",
-            s_combat_ok ? "ok" : "skip");
+            s_combat_ok ? "ok" : "skip",
+            s_hk_ok_count == 4 ? "ok" : "skip");
 
         if (s_failures == 0) {
             SMOKE_LOG("ALL_SUBSYSTEMS_OK");
@@ -1275,6 +1422,7 @@ extern "C" void ps2_smoke_tick(void)
 
     /* Synthetic input runs in every mode, including the frontend screens. */
     smoke_key_tap_finish(now);
+    smoke_pad_tap_finish(now);
     smoke_script_tick(now);
 
     /* Frontend screens: if a modal screen stopped responding, fire an ESC
@@ -1291,7 +1439,7 @@ extern "C" void ps2_smoke_tick(void)
 
         s_frontend_deadline = 0;
         smoke_fail("frontend screen timed out; forcing ESC");
-        smoke_script_arm(now, esc_burst, SMOKE_SCRIPT_MAX);
+        smoke_script_arm(now, esc_burst, 6);
     }
 
     if (!s_active) {
@@ -1455,7 +1603,7 @@ extern "C" void ps2_smoke_tick(void)
                 { 4600, SMOKE_SCRIPT_KEY, SDL_SCANCODE_ESCAPE, 0 },
             };
 
-            smoke_script_arm(now, slides, SMOKE_SCRIPT_MAX);
+            smoke_script_arm(now, slides, 6);
             s_phase = 3;
             s_state_time = now;
         } else if (s_phase == 3 && smoke_script_done() && elapsed >= 5600) {
@@ -1516,13 +1664,11 @@ extern "C" void ps2_smoke_tick(void)
 
     case SMOKE_STATE_SAVELOAD:
         if (s_phase == 0) {
-            /* Capture the live state, then save it into slot 1. */
-            static const SmokeScriptEntry save_keys[] = {
-                { 2500, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RETURN, 0 },
-                { 5200, SMOKE_SCRIPT_KEY, SDL_SCANCODE_RETURN, 0 },
-            };
-
-            SMOKE_LOG("state9: save/load round-trip (slot 1)");
+            /* Capture the live state, then save it into slot 1 with a
+             * custom name typed via the on-screen keyboard ("PS2_SLOT_1").
+             * The save dialog pre-fills the old description; clear it first
+             * with 14 backspaces (Square), then type the 10-char name. */
+            SMOKE_LOG("state9: save/load round-trip (slot 1) with OSK name 'PS2_SLOT_1'");
             ps2_save_slot_wipe(1);
 
             snprintf(s9_map, sizeof(s9_map), "%s", map_data.name);
@@ -1533,13 +1679,14 @@ extern "C" void ps2_smoke_tick(void)
             SMOKE_LOG("state9: pre-save map=%s tile=%d items=%d time=%d gvar=%d",
                 s9_map, s9_tile, s9_items, s9_time, s9_gvar);
 
-            smoke_script_arm(now, save_keys, 2);
-            s_frontend_deadline = now + SMOKE_FRONTEND_STEP_MS;
+            build_osk_script(now, "PS2_SLOT_1");
+            s_frontend_deadline = now + SMOKE_OSK_DEADLINE_MS;
             s_pending = SMOKE_ACTION_SAVE;
             s_phase = 10;
         } else if (s_phase == 11) {
             bool filesOk = s9_save_rc == 1;
             unsigned char head[8];
+            unsigned char desc[32];
             long len;
 
             if (s9_save_rc != 1) {
@@ -1553,6 +1700,28 @@ extern "C" void ps2_smoke_tick(void)
                 filesOk = false;
             } else {
                 SMOKE_LOG("state9: SAVE.DAT committed (%ld bytes)", len);
+            }
+
+            /* Verify the custom description in SAVE.DAT (offset 61, 30 bytes). */
+            len = smoke_slot_file_read("SAVE.DAT", 61, desc, 30);
+            if (len < 30) {
+                smoke_fail("state9: could not read SAVE.DAT description");
+                filesOk = false;
+            } else {
+                desc[30] = '\0';
+                /* Trim trailing NULs/spaces for comparison. */
+                int dlen = 30;
+                while (dlen > 0 && (desc[dlen - 1] == '\0' || desc[dlen - 1] == ' ')) {
+                    dlen--;
+                }
+                desc[dlen] = '\0';
+                SMOKE_LOG("state9: SAVE.DAT description = '%s'", desc);
+                if (strcasecmp((const char*)desc, "PS2_SLOT_1") != 0) {
+                    smoke_fail("state9: description mismatch (expected 'PS2_SLOT_1')");
+                    filesOk = false;
+                } else {
+                    SMOKE_LOG("state9: description matches 'PS2_SLOT_1'");
+                }
             }
 
             /* Map payloads: one .SAV per map. The listing goes through
@@ -1600,6 +1769,7 @@ extern "C" void ps2_smoke_tick(void)
             /* Reboot to the start map; slot 1 must bring the junkentown
              * state back afterwards. */
             s_pending = SMOKE_ACTION_WIPE;
+            s_phase = 20;
             s_phase = 20;
         } else if (s_phase == 21) {
             static const SmokeScriptEntry load_keys[] = {
@@ -1879,10 +2049,10 @@ extern "C" void ps2_smoke_tick(void)
                     smoke_fail("combat: cycle finished without player attack or AI turn");
                 }
 
-                s_state = SMOKE_STATE_VERDICT;
+                s_state = SMOKE_STATE_PAD_HOTKEYS;
                 s_state_time = now;
                 s_phase = 0;
-                s_pending = SMOKE_ACTION_VERDICT;
+                s_pending = SMOKE_ACTION_NONE;
             } else {
                 /* AI turn sampling. */
                 if (!s_cbt_ai_seen && combat_turn_obj != NULL && combat_turn_obj != obj_dude) {
@@ -1917,6 +2087,106 @@ extern "C" void ps2_smoke_tick(void)
                             }
                         }
                     }
+                }
+            }
+        }
+        break;
+    }
+
+    case SMOKE_STATE_PAD_HOTKEYS: {
+        /* F8: validate that the ergonomic pad bindings dispatch without
+         * latency or drops. The pad button is injected through the real pad
+         * path; dispatch is proven by the engine's own state:
+         *   - I / C / P open modal screens that run their own blocking
+         *     loop, so the top-level frame counter must freeze while they
+         *     are open and resume once START (Escape) closes them.
+         *   - R1 maps to 'a' (combat(NULL)) outside combat, so isInCombat()
+         *     turning true proves the key reached the engine; the battle is
+         *     then force-ended exactly like state 12. */
+        static const uint16_t hk_buttons[] = { PAD_SQUARE, PAD_TRIANGLE, PAD_SELECT, PAD_R1 };
+        static const char* hk_names[] = { "SQUARE->I", "TRIANGLE->C", "SELECT->P", "R1->A" };
+        static const unsigned int hk_close_ms[] = { 700, 1500, 1200, 2500 };
+        unsigned int frames;
+
+        if (s_phase == 0) {
+            SMOKE_LOG("state13: testing pad hotkeys (I, C, P, A)");
+            s_hk_step = 0;
+            s_hk_ok_count = 0;
+            s_phase = 1;
+            s_state_time = now;
+        } else if (s_phase == 1 && s_hk_step < 4) {
+            smoke_pad_tap(hk_buttons[s_hk_step], now);
+            s_hk_start = now;
+            s_hk_frames_at_tap = s_frames;
+            s_phase = 2;
+            s_state_time = now;
+            SMOKE_LOG("state13: %s tapped (frame %u)", hk_names[s_hk_step], s_frames);
+        } else if (s_phase == 1) {
+            SMOKE_LOG("state13: %d/4 pad hotkeys dispatched clean", s_hk_ok_count);
+            if (s_hk_ok_count == 4) {
+                SMOKE_LOG("state13 PASS: pad hotkey dispatch verified");
+            }
+            s_state = SMOKE_STATE_VERDICT;
+            s_state_time = now;
+            s_phase = 0;
+            s_pending = SMOKE_ACTION_VERDICT;
+        } else if (s_phase == 2) {
+            if (s_hk_step == 3) {
+                /* R1 outside combat -> 'a' -> combat(NULL). */
+                if (isInCombat()) {
+                    SMOKE_LOG("state13: %s engaged combat(NULL) in %u ms", hk_names[3], elapsed);
+                    s_hk_ok_count++;
+                    game_user_wants_to_quit = 1; /* force-end, as state 12 */
+                    s_phase = 3;
+                    s_state_time = now;
+                } else if (elapsed > 2000) {
+                    smoke_fail("state13: R1 did not engage combat mode");
+                    s_state = SMOKE_STATE_VERDICT;
+                    s_state_time = now;
+                    s_phase = 0;
+                    s_pending = SMOKE_ACTION_VERDICT;
+                }
+            } else if (elapsed >= hk_close_ms[s_hk_step]) {
+                frames = s_frames - s_hk_frames_at_tap;
+                if (frames <= 1) {
+                    SMOKE_LOG("state13: %s opened a modal (top-level loop stalled %u frames)",
+                        hk_names[s_hk_step], frames);
+                    s_hk_ok_count++;
+                } else {
+                    SMOKE_LOG("state13: %s did not open its screen (%u frames advanced)",
+                        hk_names[s_hk_step], frames);
+                    smoke_fail("state13: hotkey did not open its screen");
+                }
+                smoke_pad_tap(PAD_START, now); /* Escape closes the modal */
+                s_phase = 3;
+                s_state_time = now;
+            }
+        } else if (s_phase == 3) {
+            if (s_hk_step == 3) {
+                if (!isInCombat()) {
+                    SMOKE_LOG("state13: %s battle ended, loop resumed", hk_names[3]);
+                    s_hk_step++;
+                    s_phase = 1;
+                    s_state_time = now;
+                } else if (elapsed > SMOKE_HK_MAX_MS) {
+                    smoke_fail("state13: combat did not end after force-quit");
+                    s_state = SMOKE_STATE_VERDICT;
+                    s_state_time = now;
+                    s_phase = 0;
+                    s_pending = SMOKE_ACTION_VERDICT;
+                }
+            } else {
+                if (s_frames > s_hk_frames_at_tap) {
+                    SMOKE_LOG("state13: %s closed via START (frame %u)", hk_names[s_hk_step], s_frames);
+                    s_hk_step++;
+                    s_phase = 1;
+                    s_state_time = now;
+                } else if (elapsed > 2000) {
+                    smoke_fail("state13: screen did not close via START");
+                    s_state = SMOKE_STATE_VERDICT;
+                    s_state_time = now;
+                    s_phase = 0;
+                    s_pending = SMOKE_ACTION_VERDICT;
                 }
             }
         }
