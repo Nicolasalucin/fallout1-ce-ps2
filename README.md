@@ -60,7 +60,7 @@ legal copy of Fallout to use this software (see
 
 ## Status
 
-Work in progress (native port under construction):
+**v1.0.0-rc1** — release candidate. All planned phases (F0–F9) have landed and the full smoke suite is green on PCSX2 (frontend, save/load with the on-screen keyboard, world tour, dialogue, combat, pad hotkeys):
 
 - [x] F0 — Repository setup, legal hygiene, cross-build pipeline (Docker)
 - [x] F1 — Full engine compiles for MIPS / platform stubs
@@ -156,6 +156,12 @@ docker run --rm -v "$(pwd):/src" -w /src fallout-ce-ps2-build sh -c \
 The result is `fallout1-ce.elf` in the repository root. Copy it to your
 `mass:/FALLOUT/` folder (console) or boot it with PCSX2 (emulator).
 
+For a release bundle, run `tools/make_dist.sh`: it builds the shipping ELF
+(Release, smoke harness disabled), strips it with
+`mips64r5900el-ps2-elf-strip` and assembles `dist/FALLOUT/` with
+`FALLOUT.ELF`, `SYSTEM.CNF` and `README_PS2.txt` — copy that folder to your
+device or burn it to CD/DVD.
+
 ## Controls (DualShock 2)
 
 | Input | Action |
@@ -193,6 +199,14 @@ If no Memory Card is present (or it is full), the game falls back to
 Put mods in `mods/` next to the game data (loose files or `.dat` files).
 Mods override `master.dat`/`critter.dat` content. A boot menu lets you
 enable/disable detected mods with the controller before the game starts.
+
+## Support the Port
+
+If you enjoy playing Fallout on the PlayStation 2 and want to buy me a
+coffee for the time spent optimizing and porting the engine:
+
+- **International (USD / PayPal):** [Ko-fi](https://ko-fi.com/nicolasalucin)
+- **Argentina (Mercado Pago):** [Cafecito](https://cafecito.app/nicolasalucin)
 
 ## License
 
@@ -255,7 +269,7 @@ para usar este software (ver [Cómo usar tus propios datos legales]).
 
 ## Estado
 
-Trabajo en curso (port nativo en construcción):
+**v1.0.0-rc1** — release candidate. Todas las fases previstas (F0–F9) están completadas y la suite de smoke completa da verde en PCSX2 (frontend, guardado/carga con teclado en pantalla, world tour, diálogos, combate, atajos del pad):
 
 - [x] F0 — Preparación del repositorio, higiene legal, build cruzado (Docker)
 - [x] F1 — El motor completo compila para MIPS / stubs de plataforma
@@ -349,6 +363,12 @@ docker run --rm -v "$(pwd):/src" -w /src fallout-ce-ps2-build sh -c \
 El resultado es `fallout1-ce.elf` en la raíz del repositorio. Cópialo a
 `mass:/FALLOUT/` (consola) o arráncalo con PCSX2 (emulador).
 
+Para generar el paquete de release, ejecutá `tools/make_dist.sh`: compila el
+ELF definitivo (Release, sin el harness de smoke), lo strippea con
+`mips64r5900el-ps2-elf-strip` y arma `dist/FALLOUT/` con `FALLOUT.ELF`,
+`SYSTEM.CNF` y `README_PS2.txt`; copiá esa carpeta a tu dispositivo o
+grabala en CD/DVD.
+
 ## Controles (DualShock 2)
 
 | Entrada | Acción |
@@ -387,6 +407,14 @@ Coloca los mods en `mods/` junto a los datos del juego (archivos sueltos o
 `.dat`). Los mods tienen prioridad sobre `master.dat`/`critter.dat`. Un menú
 de arranque permite activar/desactivar los mods detectados con el mando antes
 de iniciar la partida.
+
+## Apoyá el port
+
+Si disfrutás jugando Fallout en la PlayStation 2 y querés invitarme un café
+por el tiempo dedicado a optimizar y portear el motor:
+
+- **Internacional (USD / PayPal):** [Ko-fi](https://ko-fi.com/nicolasalucin)
+- **Argentina (Mercado Pago):** [Cafecito](https://cafecito.app/nicolasalucin)
 
 ## Licencia
 
