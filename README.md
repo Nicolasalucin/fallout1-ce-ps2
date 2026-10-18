@@ -71,7 +71,7 @@ Work in progress (native port under construction):
 - [x] F6 — Memory Card saves (`mc0:/FALLOUT1_Sxx`) + slot icons; auto-named saves (on-screen keyboard deferred to F8)
 - [x] F7 — Memory: heap audit + capped caches (no arena allocator needed); world-tour / dialogue / combat stress with heap watermarks under 32 MB RDRAM
 - [x] F8 — On-screen keyboard (save naming) + DualShock 2 ergonomic mapping; pad hotkey dispatch verified
-- [ ] F9 — Hardware hardening (USB / MX4SIO / HDD)
+- [x] F9 — Real-hardware storage: ELF-relative asset discovery (USB / MX4SIO / HDD / CD), embedded USB + BDM IOP drivers, case-insensitive path resolution
 
 ---
 
@@ -115,6 +115,15 @@ mass:/FALLOUT/saves/...       (fallback save location)
 ```
 
 The USB stick must be FAT32. MX4SIO exposes the SD card as `mass:` as well.
+
+The game locates `MASTER.DAT`/`CRITTER.DAT` automatically: first next to the
+ELF (the directory it was launched from), then `mass:`, `mass0:`, `cdrom0:`,
+`hdd0:` and finally the PCSX2 `host:` layouts. Booted as a raw ELF without a
+loader-provided IOP stack, the build brings up USB/MX4SIO storage using the
+ps2sdk drivers embedded in the ELF; under OPL/uLaunchELF those drivers are
+already resident and are detected and left alone. Saves are independent of the
+asset device: they always go to the memory card (`mc0:`, then `mc1:`, then the
+asset folder if there is no card).
 
 **On PCSX2 (recommended for development/fast testing):**
 
@@ -259,7 +268,7 @@ Trabajo en curso (port nativo en construcción):
   ranura; nombre automático (teclado en pantalla para nombrar pospuesto a F8)
 - [x] F7 — Memoria: auditoría de heap + cachés con tope (sin asignador de arena); stress world-tour / diálogo / combate con watermarks bajo los 32 MB de RDRAM
 - [x] F8 — Teclado en pantalla (nombre de guardado) + mapeo ergonómico DualShock 2; despacho de atajos de pad verificado
-- [ ] F9 — Robustez en hardware real (USB / MX4SIO / HDD)
+- [x] F9 — Almacenamiento en hardware real: búsqueda de assets relativa al ELF (USB / MX4SIO / HDD / CD), drivers IOP USB + BDM embebidos, resolución de rutas sin distinguir mayúsculas
 
 ## Bring Your Own Game (usa tus propios datos)
 
@@ -298,6 +307,15 @@ mass:/FALLOUT/saves/...       (guardado alternativo)
 ```
 
 El pendrive debe estar en FAT32. MX4SIO expone la SD como `mass:` también.
+
+El juego localiza `MASTER.DAT`/`CRITTER.DAT` automáticamente: primero junto al
+ELF (la carpeta desde la que se lanzó), luego `mass:`, `mass0:`, `cdrom0:`,
+`hdd0:` y por último los layouts `host:` de PCSX2. Si arrancas el ELF "a pelo"
+sin la pila IOP de un loader, el propio build monta el almacenamiento
+USB/MX4SIO con los drivers de ps2sdk embebidos en el ELF; con OPL/uLaunchELF
+esos drivers ya están cargados y se detectan sin tocarlos. Los guardados son
+independientes del dispositivo de datos: van siempre a la tarjeta de memoria
+(`mc0:`, si no `mc1:`, y si no hay tarjeta a la carpeta de assets).
 
 **PCSX2 (recomendado para desarrollo/pruebas rápidas):**
 

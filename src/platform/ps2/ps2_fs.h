@@ -2,21 +2,31 @@
 #define PS2_FS_H_
 
 /*
- * PS2 filesystem layer (F4).
+ * PS2 filesystem layer (F4/F9).
  *
  * The engine asks for game data with relative names ("master.dat",
  * "sound/music/01hub.acm", data files in backslash notation, ...). This layer
  * maps those names onto the PS2 storage devices with this probe order:
  *
- *   host:local_assets/   (PCSX2 host filesystem; also handy on hardware
- *                         via ps2link/ps2client)
- *   mass:/FALLOUT/       (USB stick / MX4SIO)
- *   hdd0:/FALLOUT/       (internal HDD, PFS partition)
+ *   <ELF dir>/            (relative to the running ELF, from argv[0])
+ *   <ELF dir>/local_assets/
+ *   mass:/FALLOUT/        (USB stick / MX4SIO)
+ *   mass:/                (USB stick, data at the root)
+ *   mass0:/FALLOUT/       (numbered mass device)
+ *   cdrom0:/              (CD/DVD)
+ *   cdrom0:/FALLOUT/
+ *   hdd0:/FALLOUT/        (internal HDD, PFS partition)
+ *   host:local_assets/    (PCSX2 host filesystem / ps2client dev layout)
+ *   host:../local_assets/ (ELF in build_ps2/ under the repo)
+ *   host:/                (PCSX2 host root)
  *
- * Lookups are case-insensitive (the CD shipped uppercase names, the engine
- * uses lowercase). Large ".dat" files get a block-sized stdio buffer so
- * random reads inside master.dat/critter.dat do not degrade into tiny
- * driver transactions.
+ * A root is only accepted when both MASTER.DAT and CRITTER.DAT open there.
+ * Lookups are case-insensitive (the shipped media is uppercase, the engine
+ * uses lowercase): every component is matched with readdir() against the
+ * real directory entries, which works on FAT32, ISO9660, host and PFS
+ * alike. Large ".dat" files get a block-sized stdio buffer so random reads
+ * inside master.dat/critter.dat do not degrade into tiny driver
+ * transactions.
  */
 
 #include <stdio.h>

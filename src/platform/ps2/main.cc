@@ -19,7 +19,7 @@
 #include "game/main.h"
 #include "ps2_video.h"
 
-extern "C" int ps2_boot(void);
+extern "C" int ps2_boot(const char* argv0);
 
 namespace fallout {
 
@@ -30,7 +30,7 @@ char GNW95_title[256] = "Fallout";
 
 int main(int argc, char* argv[])
 {
-    if (ps2_boot() != 0) {
+    if (ps2_boot(argc > 0 ? argv[0] : NULL) != 0) {
         printf("[ps2] boot failed\n");
         return 1;
     }

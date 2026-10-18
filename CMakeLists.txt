@@ -313,6 +313,7 @@ if(PS2)
         "src/platform/ps2/ps2_osk.c"
         "src/platform/ps2/fs.c"
         "src/platform/ps2/ps2_save.c"
+        "src/platform/ps2/ps2_storage.c"
         "src/platform/ps2/audio_audsrv.c"
         "src/platform/ps2/platform_compat_ps2.cc"
         "src/platform/ps2/sdl/sdl_shim.c"
@@ -338,6 +339,24 @@ if(PS2)
         "const unsigned char g_audsrv_irx[] = { ${_ps2_audsrv_irx_bytes} 0x00 };\n"
         "const unsigned int g_audsrv_irx_size = sizeof(g_audsrv_irx) - 1;\n")
     target_sources(${EXECUTABLE_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/audsrv_irx_data.c")
+
+    # F9: IOP drivers for USB mass storage are embedded the same way, so a
+    # raw-ELF boot (uLaunchELF "Launch Elf", no preloaded IOP stack) can read
+    # game data from mass: without shipping loose .irx files. The tiered
+    # loading in ps2_storage.c only touches them when the device is not
+    # already provided by the loader (OPL/uLaunchELF/ps2link/PCSX2).
+    set(_ps2_storage_irx_modules usbd usbhdfsd bdm usbmass_bd bdmfs_fatfs sio2man mx4sio_bd)
+    set(_ps2_storage_irx_sources "")
+    foreach(_ps2_irx ${_ps2_storage_irx_modules})
+        file(READ "${PS2SDK}/iop/irx/${_ps2_irx}.irx" _ps2_irx_hex HEX)
+        string(REGEX REPLACE "(..)" "0x\\1," _ps2_irx_bytes "${_ps2_irx_hex}")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ps2_${_ps2_irx}_irx_data.c"
+            "/* Generated from ps2sdk ${_ps2_irx}.irx - do not edit. */\n"
+            "const unsigned char g_ps2_${_ps2_irx}_irx[] = { ${_ps2_irx_bytes} 0x00 };\n"
+            "const unsigned int g_ps2_${_ps2_irx}_irx_size = sizeof(g_ps2_${_ps2_irx}_irx) - 1;\n")
+        list(APPEND _ps2_storage_irx_sources "${CMAKE_CURRENT_BINARY_DIR}/ps2_${_ps2_irx}_irx_data.c")
+    endforeach()
+    target_sources(${EXECUTABLE_NAME} PRIVATE ${_ps2_storage_irx_sources})
 
     # The same module is also dropped next to the ELF. Under PCSX2 the
     # EE->IOP DMA route of SifExecModuleBuffer is broken by the IOP HLE (the

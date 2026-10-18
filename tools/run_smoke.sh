@@ -124,7 +124,7 @@ fi
 if [ -f "$EMULOG" ]; then
   say "smoke output:"
   tail -n +$((START_LINE + 1)) "$EMULOG" \
-    | grep -E "\[ps2\]\[smoke\]|\[ps2\] osk:|\[ps2\] fs: (diag|probe)|MAP: |WORLD MAP" || true
+    | grep -E "\[ps2\]\[smoke\]|\[ps2\] osk:|\[ps2\] storage:|\[ps2\] fs: (diag|probe|data root)|MAP: |WORLD MAP" || true
 fi
 
 if [ -z "$VERDICT" ]; then

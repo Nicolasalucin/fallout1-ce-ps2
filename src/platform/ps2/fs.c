@@ -8,6 +8,7 @@
 #include "ps2_fs.h"
 
 #include "ps2_save.h"
+#include "ps2_storage.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -16,16 +17,23 @@
 #include <strings.h> /* strncasecmp */
 #include <unistd.h>
 
-#define PS2_FS_MAX_ROOTS 4
+#define PS2_FS_MAX_ROOTS 12
 #define PS2_FS_ROOT_MAX 40
 #define PS2_FS_PATH_MAX 256
 #define PS2_FS_DAT_BUFSIZE (64 * 1024)
 
-static const char* const s_candidates[PS2_FS_MAX_ROOTS] = {
-    "host:local_assets/",  /* user layout: ELF and local_assets together */
+/* F9 fallback chain (after the ELF-relative roots, which ps2_fs_init()
+ * prepends dynamically): mass: -> mass0: -> cdrom0: -> hdd0: -> host:. */
+static const char* const s_candidates[] = {
+    "mass:/FALLOUT/",        /* USB stick / MX4SIO in a FALLOUT folder */
+    "mass:/",                /* USB stick with the data at the root */
+    "mass0:/FALLOUT/",       /* numbered mass device */
+    "cdrom0:/",              /* CD/DVD root */
+    "cdrom0:/FALLOUT/",      /* CD/DVD with the data in a FALLOUT folder */
+    "hdd0:/FALLOUT/",        /* internal HDD (PFS partition) */
+    "host:local_assets/",    /* user layout: ELF and local_assets together */
     "host:../local_assets/", /* dev layout: ELF in build_ps2/ under the repo */
-    "mass:/FALLOUT/",      /* USB stick / MX4SIO */
-    "hdd0:/FALLOUT/",      /* internal HDD (PFS partition) */
+    "host:/",                /* PCSX2 host filesystem / ps2client ELF dir */
 };
 
 static char s_roots[PS2_FS_MAX_ROOTS][PS2_FS_ROOT_MAX];
@@ -82,25 +90,38 @@ static void fs_normalize(const char* path, char* out, int out_size)
     out[i] = '\0';
 }
 
+/* A root is usable when both game datafiles open: the engine needs both, so
+ * accepting a root with only MASTER.DAT would just move the failure deeper
+ * into the boot. */
 static void fs_validate_root(const char* root)
 {
+    static const char* const probes[] = { "MASTER.DAT", "CRITTER.DAT" };
     char probe[PS2_FS_PATH_MAX];
-    int fd;
+    int i;
 
     if (s_root_count >= PS2_FS_MAX_ROOTS) {
         return;
     }
 
-    if (snprintf(probe, sizeof(probe), "%sMASTER.DAT", root) >= (int)sizeof(probe)) {
+    if (strlen(root) >= PS2_FS_ROOT_MAX) {
+        printf("[ps2] fs: '%s' not available (root path too long)\n", root);
         return;
     }
 
-    fd = open(probe, O_RDONLY);
-    if (fd < 0) {
-        printf("[ps2] fs: '%s' not available\n", root);
-        return;
+    for (i = 0; i < (int)(sizeof(probes) / sizeof(probes[0])); i++) {
+        int fd;
+
+        if (snprintf(probe, sizeof(probe), "%s%s", root, probes[i]) >= (int)sizeof(probe)) {
+            return;
+        }
+
+        fd = open(probe, O_RDONLY);
+        if (fd < 0) {
+            printf("[ps2] fs: '%s' not available (%s)\n", root, probes[i]);
+            return;
+        }
+        close(fd);
     }
-    close(fd);
 
     snprintf(s_roots[s_root_count], PS2_FS_ROOT_MAX, "%s", root);
     s_root_count++;
@@ -109,6 +130,7 @@ static void fs_validate_root(const char* root)
 
 void ps2_fs_init(void)
 {
+    const char* elf_dir;
     int i;
 
     if (s_probed) {
@@ -117,32 +139,49 @@ void ps2_fs_init(void)
     s_probed = 1;
 
     printf("[ps2] fs: probing game data devices...\n");
-    for (i = 0; i < PS2_FS_MAX_ROOTS; i++) {
+
+    /* F9: the directory the ELF runs from comes first (media deployment),
+     * then its local_assets/ subdirectory for the dev layouts. Both are
+     * skipped when argv[0] carries no device path. */
+    elf_dir = ps2_storage_elf_dir();
+    if (elf_dir != NULL) {
+        char elf_assets[PS2_FS_ROOT_MAX];
+
+        fs_validate_root(elf_dir);
+        if (snprintf(elf_assets, sizeof(elf_assets), "%slocal_assets/", elf_dir) < (int)sizeof(elf_assets)) {
+            fs_validate_root(elf_assets);
+        }
+    }
+
+    for (i = 0; i < (int)(sizeof(s_candidates) / sizeof(s_candidates[0])); i++) {
         fs_validate_root(s_candidates[i]);
     }
 
-    if (s_root_count == 0) {
-        printf("[ps2] fs: WARNING no game data root found\n");
+    if (s_root_count > 0) {
+        printf("[ps2] storage: asset root detected at %s\n", s_roots[0]);
+        return;
+    }
 
-        /* Temporary F4 diagnostics: what does the PCSX2 host: root expose? */
-        {
-            DIR* d = opendir("host:");
-            if (d == NULL) {
-                d = opendir("host:/");
+    printf("[ps2] fs: WARNING no game data root found\n");
+
+    /* Temporary F4 diagnostics: what does the PCSX2 host: root expose? */
+    {
+        DIR* d = opendir("host:");
+        if (d == NULL) {
+            d = opendir("host:/");
+        }
+        if (d == NULL) {
+            printf("[ps2] fs: diag: opendir(host:) failed\n");
+        } else {
+            struct dirent* e;
+            int n = 0;
+            printf("[ps2] fs: diag: host: contains:");
+            while ((e = readdir(d)) != NULL && n < 12) {
+                printf(" [%s]", e->d_name);
+                n++;
             }
-            if (d == NULL) {
-                printf("[ps2] fs: diag: opendir(host:) failed\n");
-            } else {
-                struct dirent* e;
-                int n = 0;
-                printf("[ps2] fs: diag: host: contains:");
-                while ((e = readdir(d)) != NULL && n < 12) {
-                    printf(" [%s]", e->d_name);
-                    n++;
-                }
-                printf("\n");
-                closedir(d);
-            }
+            printf("\n");
+            closedir(d);
         }
     }
 }
@@ -240,6 +279,18 @@ int ps2_fs_canonicalize(char* path, int allow_missing_last)
         }
         closedir(d);
 
+        /* Missing component: keep the requested spelling when the caller
+         * allows creating the file, otherwise fail the resolution.
+         *
+         * Note: there is deliberately no direct ALL-CAPS probe open() here.
+         * The readdir() scan above already resolves existing names
+         * case-insensitively on every device type the port uses (FAT32,
+         * ISO9660, host, PFS), so a blind uppercase open() could only add a
+         * failed open for genuinely missing files -- and on PCSX2 a failing
+         * open() corrupts the host filesystem HLE (SIF RPC state, the VM
+         * crashes ~100 ms later). Bisection confirmed it (F9). The literal
+         * uppercase probes in fs_validate_root() (MASTER.DAT / CRITTER.DAT)
+         * cover the "try ALL CAPS" rule where it is safe and useful. */
         if (!found) {
             if (!(last && allow_missing_last)) {
                 return -1;
