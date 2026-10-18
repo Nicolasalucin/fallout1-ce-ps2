@@ -48,6 +48,9 @@
 *.a
 *.map.txt
 
+# === Release packaging (uploaded to GitHub Releases, not committed) ===
+/dist/*.zip
+
 # === Runtime droppings ===
 fallout.cfg
 f1_res.ini
