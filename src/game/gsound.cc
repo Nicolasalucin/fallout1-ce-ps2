@@ -26,6 +26,10 @@
 #include "plib/gnw/memory.h"
 #include "pointer_registry.h"
 
+#ifdef __PS2__
+#include "ps2_debug.h"
+#endif
+
 namespace fallout {
 
 static void gsound_bkg_proc();
@@ -638,6 +642,11 @@ int gsound_background_play(const char* fileName, int a2, int a3, int a4)
 
     strcpy(background_fname_requested, fileName);
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] gsound: background_play '%s' (storage=%d loop=%d init=%d enabled=%d)",
+        fileName, a3, a4, gsound_initialized, gsound_background_enabled);
+#endif
+
     if (!gsound_initialized) {
         return -1;
     }
@@ -740,11 +749,19 @@ int gsound_background_play(const char* fileName, int a2, int a3, int a4)
             debug_printf("failed on call to soundLoad.\n");
         }
 
+#ifdef __PS2__
+        PS2_LOG("[ps2] gsound: soundLoad '%s' FAILED (%d)", path, rc);
+#endif
+
         soundDelete(gsound_background_tag);
         gsound_background_tag = NULL;
 
         return -1;
     }
+
+#ifdef __PS2__
+    PS2_LOG("[ps2] gsound: soundLoad '%s' ok", path);
+#endif
 
     if (a2 != 11) {
         rc = soundSetReadLimit(gsound_background_tag, 0x40000);
@@ -765,6 +782,10 @@ int gsound_background_play(const char* fileName, int a2, int a3, int a4)
             debug_printf("failed starting to play.\n");
         }
 
+#ifdef __PS2__
+        PS2_LOG("[ps2] gsound: background start '%s' FAILED (%d)", fileName, rc);
+#endif
+
         soundDelete(gsound_background_tag);
         gsound_background_tag = NULL;
 
@@ -774,6 +795,10 @@ int gsound_background_play(const char* fileName, int a2, int a3, int a4)
     if (gsound_debug) {
         debug_printf("succeeded.\n");
     }
+
+#ifdef __PS2__
+    PS2_LOG("[ps2] gsound: background '%s' started", fileName);
+#endif
 
     return 0;
 }
@@ -1799,6 +1824,9 @@ static int gsound_background_find_with_copy(char* dest, const char* src)
     if (gsound_file_exists_f(outPath)) {
         strncpy(dest, outPath, COMPAT_MAX_PATH);
         dest[COMPAT_MAX_PATH] = '\0';
+#ifdef __PS2__
+        PS2_LOG("[ps2] gsound: ACM '%s' -> '%s' (in place)", src, outPath);
+#endif
         return 0;
     }
 
@@ -1816,6 +1844,10 @@ static int gsound_background_find_with_copy(char* dest, const char* src)
         if (gsound_debug) {
             debug_printf("Unable to find music file %s to copy down.\n", src);
         }
+
+#ifdef __PS2__
+        PS2_LOG("[ps2] gsound: ACM '%s' NOT FOUND (tried '%s' and '%s')", src, outPath, inPath);
+#endif
 
         return -1;
     }

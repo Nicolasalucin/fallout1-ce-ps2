@@ -16,6 +16,10 @@
 #include "game/map.h"
 #include "game/object.h"
 #include "platform_compat.h"
+#ifdef __PS2__
+#include "ps2_debug.h"
+#include "ps2_mem.h"
+#endif
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
 #include "plib/gnw/debug.h"
@@ -563,10 +567,17 @@ int automap_pip_save()
 
     int entryOffset = amdbhead.offsets[map][elevation];
     if (entryOffset < 0) {
+#ifdef __PS2__
+        PS2_LOG("[ps2] automap: skip map=%d elev=%d (offset<0)", map, elevation);
+#endif
         return 0;
     }
 
     debug_printf("\nAUTOMAP: Saving AutoMap DB index %d, level %d\n", map, elevation);
+#ifdef __PS2__
+    PS2_LOG("[ps2] automap: save map=%d elev=%d offset=%d free=%d KB",
+        map, elevation, entryOffset, ps2_mem_free_kb());
+#endif
 
     bool dataBuffersAllocated = false;
     ambuf = (unsigned char*)mem_malloc(11024);
@@ -591,13 +602,23 @@ int automap_pip_save()
     if (stream1 == NULL) {
         debug_printf("\nAUTOMAP: Error opening automap database file!\n");
         debug_printf("Error continued: automap_pip_save: path: %s", path);
+#ifdef __PS2__
+        PS2_LOG("[ps2] automap: db_fopen '%s' FAILED", path);
+#endif
         mem_free(ambuf);
         mem_free(cmpbuf);
         return -1;
     }
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] automap: db_fopen '%s' ok", path);
+#endif
+
     if (AM_ReadMainHeader(stream1) == -1) {
         debug_printf("\nAUTOMAP: Error reading automap database file header!\n");
+#ifdef __PS2__
+        PS2_LOG("[ps2] automap: header read FAILED");
+#endif
         mem_free(ambuf);
         mem_free(cmpbuf);
         db_fclose(stream1);
@@ -605,8 +626,14 @@ int automap_pip_save()
     }
 
     decode_map_data(elevation);
+#ifdef __PS2__
+    PS2_LOG("[ps2] automap: map data decoded, compressing");
+#endif
 
     int compressedDataSize = CompLZS(ambuf, cmpbuf, 10000);
+#ifdef __PS2__
+    PS2_LOG("[ps2] automap: CompLZS -> %d", compressedDataSize);
+#endif
     if (compressedDataSize == -1) {
         amdbsubhead.dataSize = 10000;
         amdbsubhead.isCompressed = 0;

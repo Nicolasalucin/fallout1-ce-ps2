@@ -37,6 +37,10 @@
 #include "game/tile.h"
 #include "game/worldmap_walkmask.h"
 #include "platform_compat.h"
+#ifdef __PS2__
+#include "ps2_debug.h"
+#include "ps2_mem.h"
+#endif
 #include "plib/color/color.h"
 #include "plib/db/db.h"
 #include "plib/gnw/button.h"
@@ -996,8 +1000,13 @@ int world_map(WorldMapContext ctx)
     text = getmsg(&map_msg_file, &mesg, 1000);
     body[0] = text;
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] worldmap: enter (state=%d town=%d free=%d KB)", ctx.state, ctx.town, ps2_mem_free_kb());
+#endif
+
     if (map_save_in_game(true) == -1) {
         debug_printf("\nWORLD MAP: ** Error saving map! **\n");
+        PS2_LOG("[ps2] worldmap: map_save_in_game FAILED");
         gmouse_disable(0);
         gmouse_set_cursor(MOUSE_CURSOR_ARROW);
         gsound_play_sfx_file("iisxxxx1");
@@ -1010,6 +1019,10 @@ int world_map(WorldMapContext ctx)
     iso_was_disabled = 0;
 
     soundUpdate();
+
+#ifdef __PS2__
+    PS2_LOG("[ps2] worldmap: map saved, entering UI setup");
+#endif
 
     is_moving = 0;
     reselect = 0;
@@ -1075,9 +1088,16 @@ int world_map(WorldMapContext ctx)
     }
 
     while (1) {
+#ifdef __PS2__
+        PS2_LOG("[ps2] worldmap: InitWorldMapData begin (free=%d KB)", ps2_mem_free_kb());
+#endif
         if (InitWorldMapData() == -1) {
+            PS2_LOG("[ps2] worldmap: InitWorldMapData FAILED");
             return -1;
         }
+#ifdef __PS2__
+        PS2_LOG("[ps2] worldmap: InitWorldMapData ok (free=%d KB)", ps2_mem_free_kb());
+#endif
 
         viewport_x = world_xpos - 247;
         viewport_y = world_ypos - 242;
@@ -2617,6 +2637,10 @@ static int InitWorldMapData()
 
     bk_enable = 0;
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] worldmap: InitWorldMapData (messages/FRMs) free=%d KB", ps2_mem_free_kb());
+#endif
+
     if (message_init(&wrldmap_mesg_file) != 1) {
         // FIXME: Message is misleading.
         debug_printf("\n *** WORLD MAP: Error loading world map graphics! ***\n");
@@ -2643,6 +2667,7 @@ static int InitWorldMapData()
 
     if (index != WORLDMAP_FRM_COUNT) {
         debug_printf("\n *** WORLD MAP: Error loading world map graphics! ***\n");
+        PS2_LOG("[ps2] worldmap: FRM load failed at index %d", index);
 
         while (--index > 0) {
             art_ptr_unlock(wmapidsav[index]);
@@ -2653,9 +2678,14 @@ static int InitWorldMapData()
         return -1;
     }
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] worldmap: FRMs loaded (%d) free=%d KB", WORLDMAP_FRM_COUNT, ps2_mem_free_kb());
+#endif
+
     sea_mask = (unsigned char*)mem_malloc(263524);
     if (sea_mask == NULL) {
         debug_printf("\n *** WORLD MAP: Error loading world map graphics! ***\n");
+        PS2_LOG("[ps2] worldmap: sea_mask malloc FAILED");
 
         for (index = 0; index < WORLDMAP_FRM_COUNT; index++) {
             art_ptr_unlock(wmapidsav[index]);
@@ -2669,6 +2699,7 @@ static int InitWorldMapData()
     line1bit_buf = (unsigned char*)mem_malloc(263524);
     if (line1bit_buf == NULL) {
         debug_printf("\n *** WORLD MAP: Error loading world map graphics! ***\n");
+        PS2_LOG("[ps2] worldmap: line1bit_buf malloc FAILED");
 
         for (index = 0; index < WORLDMAP_FRM_COUNT; index++) {
             art_ptr_unlock(wmapidsav[index]);
@@ -3746,10 +3777,17 @@ int PlayCityMapMusic()
 
     map_idx = map_get_index_number();
     if (map_idx != -1) {
+#ifdef __PS2__
+        PS2_LOG("[ps2] worldmap: PlayCityMapMusic map_idx=%d track='%s'", map_idx, CityMusic[map_idx]);
+#endif
         return gsound_background_play_level_music(CityMusic[map_idx], 12);
     }
 
     debug_printf("\nMAP: Failed to find map ID for music!");
+
+#ifdef __PS2__
+    PS2_LOG("[ps2] worldmap: PlayCityMapMusic failed (no map idx)");
+#endif
 
     return -1;
 }

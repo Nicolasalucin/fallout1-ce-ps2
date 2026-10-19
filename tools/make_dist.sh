@@ -14,13 +14,33 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build_ps2_release"
 DIST_DIR="$ROOT/dist/FALLOUT"
-CONTAINER="${DIST_BUILD_CONTAINER:-fps2-build}"
+CONTAINER="${DIST_BUILD_CONTAINER:-fo1-build}"
+IMAGE="${DIST_BUILD_IMAGE:-fallout-ce-ps2-build:latest}"
 
 say() { printf '[make_dist] %s\n' "$*"; }
 
+# ------------------------------------------------------ container guard ----
+case "$CONTAINER" in
+  *fo2*|*FO2*|*fallout2*|*Fallout2*|*fps2*)
+    say "ERROR: refusing to touch Fallout 2 container '$CONTAINER'"
+    exit 1
+    ;;
+esac
+
+if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+  say "creating dedicated container $CONTAINER ..."
+  docker run -d --name "$CONTAINER" -v "$ROOT":/src -w /src "$IMAGE" sleep infinity || exit 1
+elif [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+  docker start "$CONTAINER" >/dev/null || exit 1
+fi
+
+if ! docker exec "$CONTAINER" test -f /src/CMakeLists.txt; then
+  say "ERROR: $CONTAINER does not have this repository mounted at /src"
+  exit 1
+fi
+
 # ---------------------------------------------------------------- build ----
-say "building release ELF in $BUILD_DIR ..."
-docker start "$CONTAINER" >/dev/null
+say "building release ELF in $BUILD_DIR (container: $CONTAINER) ..."
 docker exec "$CONTAINER" sh -c \
   "cmake -S /src -B /src/build_ps2_release \
      -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-ps2.cmake \

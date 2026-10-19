@@ -37,6 +37,7 @@
 #include <delaythread.h>
 
 #include "ps2_audio.h"
+#include "ps2_debug.h"
 #include "ps2_input.h"
 #include "ps2_time.h"
 #include "ps2_video.h"
@@ -1099,11 +1100,18 @@ SDL_AudioDeviceID SDL_OpenAudioDevice(const char* device, int iscapture, const S
 
     /* The engine follows up with PauseAudioDevice(dev, 0) to start playback. */
     if (ps2_audio_open(desired->freq, desired->samples, ps2_sdl_audio_mix, NULL, &freq) != 0) {
-        /* No audsrv/IOP audio available. Return -1 (what audioEngineInit
-         * checks) so the engine disables sound instead of hanging on a
-         * callback that would never run. */
+        /* Only the worker thread failing lands here (the audsrv failures are
+         * absorbed by the dummy device inside ps2_audio_open). */
+        PS2_LOG("[ps2] sdl: SDL_OpenAudioDevice FAILED (requested %d Hz, %d samples)",
+            desired->freq, desired->samples);
         return (SDL_AudioDeviceID)-1;
     }
+
+    PS2_LOG("[ps2] sdl: SDL_OpenAudioDevice ok (requested %d Hz, %d samples -> %d Hz, %s)",
+        desired->freq,
+        desired->samples,
+        freq,
+        ps2_audio_is_dummy() ? "DUMMY (silent)" : "audsrv");
 
     s_audio_device_open = 1;
     s_audio_device_callback = desired->callback;

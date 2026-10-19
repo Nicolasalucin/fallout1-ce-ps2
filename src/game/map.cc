@@ -32,6 +32,10 @@
 #include "game/tile.h"
 #include "game/worldmap.h"
 #include "platform_compat.h"
+#ifdef __PS2__
+#include "ps2_debug.h"
+#include "ps2_mem.h"
+#endif
 #ifdef PS2_DEV_SMOKE_TEST
 #include "ps2_time.h"
 #endif
@@ -890,6 +894,9 @@ int map_load(char* file_name)
     char* file_path;
 
     compat_strupr(file_name);
+#ifdef __PS2__
+    PS2_LOG("[ps2] map: load '%s' (free=%d KB)", file_name, ps2_mem_free_kb());
+#endif
 #ifdef PS2_DEV_SMOKE_TEST
     ps2_mem_stat_reset();
     ps2_scr_prof_dump();
@@ -911,6 +918,10 @@ int map_load(char* file_name)
         db_fclose(stream);
         PS2_PROF("sav-probe");
 
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: '%s' save-probe stream=%p", file_name, (void*)stream);
+#endif
+
         if (stream != NULL) {
             rc = map_load_in_game(file_name);
             PlayCityMapMusic();
@@ -931,6 +942,10 @@ int map_load(char* file_name)
             obj_dude->data.critter.combat.whoHitMe = NULL;
         }
     }
+
+#ifdef __PS2__
+    PS2_LOG("[ps2] map: load '%s' -> %d (free=%d KB)", file_name, rc, ps2_mem_free_kb());
+#endif
 
     return rc;
 }
@@ -1319,6 +1334,13 @@ int map_check_state()
         return 0;
     }
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] map: check_state map=%d combat=%d free=%d KB",
+        map_state.map,
+        isInCombat() ? 1 : 0,
+        ps2_mem_free_kb());
+#endif
+
     gmouse_3d_off();
     gmouse_set_cursor(MOUSE_CURSOR_NONE);
 
@@ -1334,7 +1356,13 @@ int map_check_state()
                 ctx.town = our_town;
             }
 
+#ifdef __PS2__
+            PS2_LOG("[ps2] map: town_map -> state=%d town=%d; entering world_map", ctx.state, ctx.town);
+#endif
             world_map(ctx);
+#ifdef __PS2__
+            PS2_LOG("[ps2] map: world_map returned; killing window");
+#endif
             KillWorldWin();
             memset(&map_state, 0, sizeof(map_state));
         }
@@ -1343,14 +1371,24 @@ int map_check_state()
             anim_stop();
             ctx.state = 0;
             ctx.town = our_town;
+#ifdef __PS2__
+            PS2_LOG("[ps2] map: entering world_map directly (town=%d)", ctx.town);
+#endif
             world_map(ctx);
+#ifdef __PS2__
+            PS2_LOG("[ps2] map: world_map returned; killing window");
+#endif
             KillWorldWin();
             memset(&map_state, 0, sizeof(map_state));
         }
     } else {
         if (!isInCombat()) {
             // NOTE: Uninline.
-            map_load_idx(map_state.map);
+            int load_rc = map_load_idx(map_state.map);
+#ifdef __PS2__
+            PS2_LOG("[ps2] map: map_load_idx(%d) -> %d (free=%d KB)",
+                map_state.map, load_rc, ps2_mem_free_kb());
+#endif
 
             if (map_state.tile != -1 && map_state.tile != 0
                 && map_state.elevation >= 0 && map_state.elevation < ELEVATION_COUNT) {
@@ -1411,10 +1449,19 @@ int map_save()
     int rc = -1;
     if (map_data.name[0] != '\0') {
         char* mapFileName = map_file_path(map_data.name);
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: save '%s' -> '%s' (free=%d KB)", map_data.name, mapFileName, ps2_mem_free_kb());
+#endif
         DB_FILE* stream = db_fopen(mapFileName, "wb");
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: save '%s' db_fopen stream=%p", map_data.name, (void*)stream);
+#endif
         if (stream != NULL) {
             rc = map_save_file(stream);
             db_fclose(stream);
+#ifdef __PS2__
+            PS2_LOG("[ps2] map: save '%s' write rc=%d, closed", map_data.name, rc);
+#endif
         } else {
             snprintf(temp, sizeof(temp), "Unable to open %s to write!", map_data.name);
             debug_printf(temp);
@@ -1426,6 +1473,9 @@ int map_save()
         }
     } else {
         debug_printf("\nError: map_save: map header corrupt!");
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: save skipped (empty map name)");
+#endif
     }
 
     return rc;
@@ -1521,6 +1571,10 @@ int map_save_in_game(bool a1)
         return 0;
     }
 
+#ifdef __PS2__
+    PS2_LOG("[ps2] map: save_in_game '%s' a1=%d free=%d KB", map_data.name, a1 ? 1 : 0, ps2_mem_free_kb());
+#endif
+
     anim_stop();
 
     if (a1) {
@@ -1528,6 +1582,10 @@ int map_save_in_game(bool a1)
         partyMemberPrepItemSaveAll();
         queue_leaving_map();
         scr_exec_map_exit_scripts();
+
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: exit scripts done, saving '%s'", map_data.name);
+#endif
 
         if (map_script_id != -1) {
             Script* script;
@@ -1545,6 +1603,9 @@ int map_save_in_game(bool a1)
 
     if (a1 && !YesWriteIndex(map_get_index_number(), map_elevation)) {
         debug_printf("\nNot saving RANDOM encounter map.");
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: save_in_game random encounter, erasing '%s'", map_data.name);
+#endif
 
         strcpy(name, map_data.name);
         strmfe(map_data.name, name, "SAV");
@@ -1556,12 +1617,19 @@ int map_save_in_game(bool a1)
         strcpy(name, map_data.name);
         strmfe(map_data.name, name, "SAV");
         if (map_save() == -1) {
+            PS2_LOG("[ps2] map: map_save FAILED for '%s'", map_data.name);
             return -1;
         }
 
         strcpy(map_data.name, name);
 
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: map_save ok, automap_pip_save begin");
+#endif
         automap_pip_save();
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: automap_pip_save done");
+#endif
     }
 
     if (a1) {
@@ -1570,6 +1638,9 @@ int map_save_in_game(bool a1)
         proto_remove_all();
         square_reset();
         gtime_q_add();
+#ifdef __PS2__
+        PS2_LOG("[ps2] map: save_in_game teardown done (free=%d KB)", ps2_mem_free_kb());
+#endif
     }
 
     return 0;

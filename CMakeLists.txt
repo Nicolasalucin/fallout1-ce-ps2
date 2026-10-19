@@ -306,6 +306,7 @@ if(PS2)
     target_sources(${EXECUTABLE_NAME} PRIVATE
         "src/platform/ps2/main.cc"
         "src/platform/ps2/boot.c"
+        "src/platform/ps2/ps2_debug.c"
         "src/platform/ps2/ps2_time.c"
         "src/platform/ps2/ps2_mem.c"
         "src/platform/ps2/input_pad.c"
@@ -336,7 +337,9 @@ if(PS2)
     string(REGEX REPLACE "(..)" "0x\\1," _ps2_audsrv_irx_bytes "${_ps2_audsrv_irx_hex}")
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/audsrv_irx_data.c"
         "/* Generated from ps2sdk audsrv.irx - do not edit. */\n"
-        "const unsigned char g_audsrv_irx[] = { ${_ps2_audsrv_irx_bytes} 0x00 };\n"
+        "/* aligned(16): SifExecModuleBuffer DMAs from this pointer and the EE\n"
+        " * DMAC silently ignores the low four address bits. */\n"
+        "const unsigned char g_audsrv_irx[] __attribute__((aligned(16))) = { ${_ps2_audsrv_irx_bytes} 0x00 };\n"
         "const unsigned int g_audsrv_irx_size = sizeof(g_audsrv_irx) - 1;\n")
     target_sources(${EXECUTABLE_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/audsrv_irx_data.c")
 
@@ -352,7 +355,8 @@ if(PS2)
         string(REGEX REPLACE "(..)" "0x\\1," _ps2_irx_bytes "${_ps2_irx_hex}")
         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ps2_${_ps2_irx}_irx_data.c"
             "/* Generated from ps2sdk ${_ps2_irx}.irx - do not edit. */\n"
-            "const unsigned char g_ps2_${_ps2_irx}_irx[] = { ${_ps2_irx_bytes} 0x00 };\n"
+            "/* aligned(16): required by the SifExecModuleBuffer EE->IOP DMA. */\n"
+            "const unsigned char g_ps2_${_ps2_irx}_irx[] __attribute__((aligned(16))) = { ${_ps2_irx_bytes} 0x00 };\n"
             "const unsigned int g_ps2_${_ps2_irx}_irx_size = sizeof(g_ps2_${_ps2_irx}_irx) - 1;\n")
         list(APPEND _ps2_storage_irx_sources "${CMAKE_CURRENT_BINARY_DIR}/ps2_${_ps2_irx}_irx_data.c")
     endforeach()
@@ -395,6 +399,7 @@ if(PS2)
     # practice); the strict cast-align audit stays enabled for the engine.
     set_source_files_properties(
         src/platform/ps2/boot.c
+        src/platform/ps2/ps2_debug.c
         src/platform/ps2/ps2_time.c
         src/platform/ps2/ps2_mem.c
         src/platform/ps2/input_pad.c

@@ -33,6 +33,18 @@ void ps2_storage_init(const char* argv0);
  * usable device path. Valid after ps2_storage_init(). */
 const char* ps2_storage_elf_dir(void);
 
+/* Executes one embedded IOP module. SifExecModuleBuffer() DMAs the module
+ * image from `data`; the EE DMAC ignores the low four address bits, so a
+ * pointer that is not 16-byte aligned silently shifts the image and the IOP
+ * rejects it. If `data` is misaligned it is copied to a static 64-byte
+ * aligned bounce buffer first. Returns SifExecModuleBuffer's value (>= 0 on
+ * success). */
+int ps2_irx_exec(const char* name, const unsigned char* data, unsigned int size);
+
+/* Logs address/size/alignment for every IRX embedded in the ELF. Used by
+ * ps2_boot() so a hardware debug.log proves whether the build is correct. */
+void ps2_irx_alignment_report(void);
+
 #ifdef __cplusplus
 }
 #endif

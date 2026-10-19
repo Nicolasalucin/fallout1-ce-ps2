@@ -16,7 +16,8 @@ extern "C" {
 /* Snapshots the sbrk baseline (call once, early). */
 void ps2_mem_init(void);
 
-/* Prints one heap snapshot as a "[ps2][smoke] mem:" line. */
+/* Prints one heap snapshot as a "[ps2] mem:" line (called by the dev smoke
+ * harness; the release build keeps no smoke-tagged strings). */
 void ps2_mem_report(const char* tag);
 
 /* mallinfo() views, in KB. */

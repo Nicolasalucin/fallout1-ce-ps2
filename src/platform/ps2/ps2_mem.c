@@ -59,7 +59,7 @@ void ps2_mem_report(const char* tag)
         s_brk_base = now;
     }
 
-    printf("[ps2][smoke] mem: %-12s used=%uK free=%uK arena=%uK sbrk=+%uK\n",
+    printf("[ps2] mem: %-12s used=%uK free=%uK arena=%uK sbrk=+%uK\n",
         tag,
         (unsigned int)(mi.uordblks >> 10),
         (unsigned int)(mi.fordblks >> 10),

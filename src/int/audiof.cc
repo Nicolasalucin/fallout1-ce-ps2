@@ -11,6 +11,10 @@
 #include "platform_compat.h"
 #include "plib/gnw/debug.h"
 
+#ifdef __PS2__
+#include "ps2_debug.h"
+#endif
+
 namespace fallout {
 
 typedef enum AudioFileFlags {
@@ -93,8 +97,15 @@ int audiofOpen(const char* fname, int flags)
 
     FILE* stream = compat_fopen(path, mode);
     if (stream == NULL) {
+#ifdef __PS2__
+        PS2_LOG("[ps2] audiof: open '%s' mode '%s' FAILED (compression=%d)", path, mode, compression);
+#endif
         return -1;
     }
+
+#ifdef __PS2__
+    PS2_LOG("[ps2] audiof: open '%s' mode '%s' ok (compression=%d)", path, mode, compression);
+#endif
 
     int index;
     for (index = 0; index < numAudiof; index++) {
@@ -120,6 +131,14 @@ int audiofOpen(const char* fname, int flags)
         audioFile->flags |= AUDIO_FILE_COMPRESSED;
         audioFile->audioDecoder = Create_AudioDecoder(decodeRead, audioFile->stream, &(audioFile->channels), &(audioFile->sampleRate), &(audioFile->fileSize));
         audioFile->fileSize *= 2;
+
+#ifdef __PS2__
+        PS2_LOG("[ps2] audiof: decoder '%s' %d Hz %d ch %d bytes",
+            path,
+            audioFile->sampleRate,
+            audioFile->channels,
+            audioFile->fileSize);
+#endif
     } else {
         audioFile->fileSize = getFileSize(stream);
     }

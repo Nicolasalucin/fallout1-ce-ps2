@@ -49,8 +49,14 @@ Huge thanks to:
 - **fallout1-ce / fallout2-ce contributors** — see the upstream repositories.
 - **PS2SDK / ps2dev / gsKit authors and community** — for the toolchain,
   drivers and libraries that make PS2 homebrew possible.
-  ### AI Assistance & Tooling
-- **AI-Assisted Porting:** Developed and maintained by Nicolas Alucin using AI coding assistance ([OpenCode](https://github.com/opencode-ai) / LLMs) under human technical direction for low-level architecture, memory profiling, and platform abstraction.
+
+### AI Assistance & Tooling
+
+- **AI-assisted porting:** developed and maintained by Nicolas Alucin with AI
+  coding assistance (OpenCode / LLMs) under human technical direction for the
+  low-level architecture, RDRAM memory profiling and PS2 platform abstraction.
+  AI-assisted changes are reviewed and validated on real hardware by the
+  maintainer.
 
 ## Legal / no game assets
 
@@ -138,9 +144,10 @@ asset folder if there is no card).
   `host:local_assets/`.
 - Development tip (ELF inside `build_ps2/`): symlink the assets next to it
   once with `ln -s ../local_assets build_ps2/local_assets`.
-- `audsrv.irx` must sit **next to the ELF** (the build copies it there
-  automatically): audio is loaded from disk at startup, which also works in
-  PCSX2 with a host filesystem.
+- `audsrv.irx` and the USB/BDM/MX4SIO IOP drivers are **embedded inside the
+  ELF**; no loose `.irx` files are required next to the game. The build copies
+  `audsrv.irx` next to the ELF only as a development convenience for PCSX2's
+  host filesystem.
 
 ## Building
 
@@ -261,8 +268,14 @@ Gracias infinitas a:
 - **Colaboradores de fallout1-ce / fallout2-ce** — ver repos upstream.
 - **Comunidad ps2dev / PS2SDK / gsKit** — por el toolchain, drivers y
   librerías que hacen posible el homebrew de PS2.
-  ### Asistencia de IA y Herramientas
-- **Desarrollo asistido por IA:** Port diseñado y mantenido por Nicolas Alucin con asistencia de herramientas de IA (OpenCode / LLMs) bajo dirección técnica humana para la implementación de bajo nivel, gestión de memoria RDRAM y abstracción de plataforma para PS2.
+
+### Asistencia de IA y herramientas
+
+- **Desarrollo asistido por IA:** port diseñado y mantenido por Nicolas Alucin
+  con asistencia de herramientas de IA (OpenCode / LLMs) bajo dirección
+  técnica humana para la arquitectura de bajo nivel, el perfilado de memoria
+  RDRAM y la abstracción de plataforma PS2. Los cambios asistidos por IA son
+  revisados y validados en hardware real por el mantenedor.
 
 ## Legal / sin assets del juego
 
@@ -346,9 +359,10 @@ independientes del dispositivo de datos: van siempre a la tarjeta de memoria
   `host:local_assets/`.
 - Truco para desarrollo (ELF dentro de `build_ps2/`): enlaza los datos una vez
   con `ln -s ../local_assets build_ps2/local_assets`.
-- `audsrv.irx` debe estar **junto al ELF** (el build lo copia automáticamente):
-  el audio se carga de disco al arrancar, lo que también funciona en PCSX2
-  con host filesystem.
+- `audsrv.irx` y los drivers IOP de USB/BDM/MX4SIO van **embebidos en el ELF**;
+  no hace falta ningún `.irx` suelto junto al juego. El build copia
+  `audsrv.irx` al lado del ELF solo como comodidad de desarrollo para el host
+  filesystem de PCSX2.
 
 ## Compilación
 

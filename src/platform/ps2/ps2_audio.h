@@ -8,8 +8,9 @@
  * MVE movie player spins against the sound cursor to keep A/V in sync).
  *
  * audsrv.irx (ps2sdk) is embedded into the ELF at build time, so players
- * need no extra files next to their game data. If any step fails, the SDL
- * layer reports "no audio device" and the engine disables sound instead.
+ * need no extra files next to their game data. If any step fails, a dummy
+ * device keeps the mixer running in real time: the engine stays silent but
+ * never stalls on an audio cursor.
  */
 
 #ifndef PS2_AUDIO_H
@@ -23,7 +24,8 @@ typedef void (*ps2_audio_callback_t)(void* userdata, unsigned char* stream, int 
 
 /* Opens the SPU2 stream (loads rom0:LIBSD + the embedded audsrv.irx), starts
  * the mixer thread (initially paused) and reports the actual output rate in
- * out_freq. Returns 0 on success, -1 if audio output is unavailable. */
+ * out_freq. Returns 0 on success (including dummy fallback), -1 only when
+ * the worker thread itself cannot be created. */
 int ps2_audio_open(int desired_freq, int samples, ps2_audio_callback_t callback, void* userdata, int* out_freq);
 
 /* Must be called from the engine (main) thread every frame; streams finished
@@ -32,6 +34,10 @@ void ps2_audio_pump(void);
 
 /* Pauses/resumes streaming (pausing also mutes the SPU2 ring). */
 void ps2_audio_pause(int paused);
+
+/* 1 when the last ps2_audio_open() fell back to the silent dummy device.
+ * The mixer thread still runs and advances the engine's cursors. */
+int ps2_audio_is_dummy(void);
 
 /* Stops the worker and releases audsrv (the engine calls this at exit). */
 void ps2_audio_close(void);
