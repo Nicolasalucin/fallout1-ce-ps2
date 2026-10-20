@@ -73,7 +73,13 @@ extern "C" {
 /* TEMP profiling counters (F5.2 map load, see fs.c). */
 extern unsigned int ps2_fs_stat_fopen_calls;
 extern unsigned int ps2_fs_stat_canonicalize_calls;
+extern unsigned int ps2_fs_stat_dir_cache_hits;
+extern unsigned int ps2_fs_stat_dir_scans;
 extern void ps2_fs_stat_reset(void);
+
+/* Provided by patched ps2sdk. Weak so an unpatched SDK still links; the smoke
+ * build only calls it when present. */
+extern void sceSifRpcDumpInvalidCompletion(void) __attribute__((weak));
 }
 
 #include "game/art.h"
@@ -1352,6 +1358,9 @@ static void smoke_run_pending(unsigned int now)
 
         SMOKE_LOG("perf: suite %u ms, %u top-level frames, worst frame gap %u ms (%s)",
             now - s_suite_start, s_frames, s_worst_gap, smoke_state_name(s_worst_gap_state));
+        SMOKE_LOG("[PERF] fs: fopen=%u canonicalize=%u dir-scans=%u dir-hits=%u",
+            ps2_fs_stat_fopen_calls, ps2_fs_stat_canonicalize_calls,
+            ps2_fs_stat_dir_scans, ps2_fs_stat_dir_cache_hits);
 
         SMOKE_LOG("summary: frontend(credits=%s load=%s newgame=%s) map=%s walk=%s inventory=ok pipboy=ok options=ok charsheet=ok skilldex=ok streaming=%s save-load=%s world-tour=%s dialogue=%s combat=%s hotkeys=%s",
             s_fe_credits ? "ok" : "skip",
@@ -1418,7 +1427,14 @@ static long smoke_slot_file_read(const char* fileName, long offset, unsigned cha
 /* Timer/input state machine - event pump safe. */
 extern "C" void ps2_smoke_tick(void)
 {
-    unsigned int now = ps2_time_ms();
+    unsigned int now;
+
+    /* Print any invalid SIF completion recorded by the interrupt handler. */
+    if (sceSifRpcDumpInvalidCompletion != nullptr) {
+        sceSifRpcDumpInvalidCompletion();
+    }
+
+    now = ps2_time_ms();
 
     /* Synthetic input runs in every mode, including the frontend screens. */
     smoke_key_tap_finish(now);
@@ -1762,6 +1778,47 @@ extern "C" void ps2_smoke_tick(void)
                 filesOk = false;
             } else {
                 SMOKE_LOG("state9: icon.icn OK (%ld bytes)", len);
+            }
+
+            /* Rename probe: Fallout 1 renames every existing save payload to
+             * .BAK before writing a new one. ps2sdk's fileio has no native
+             * rename, so on a memory card this covers the copy fallback. */
+            {
+                static const char payload[] = "rename-probe";
+                const char* probeOld = "SAVEGAME\\SLOT01\\PS2_RENAME.TMP";
+                const char* probeNew = "SAVEGAME\\SLOT01\\PS2_RENAME.OK";
+                char probeData[16];
+                bool renameOk = false;
+                FILE* probe = compat_fopen(probeOld, "wb");
+
+                if (probe != NULL) {
+                    if (fwrite(payload, 1, sizeof(payload) - 1, probe) == sizeof(payload) - 1) {
+                        renameOk = fclose(probe) == 0;
+                    } else {
+                        fclose(probe);
+                    }
+                }
+
+                if (renameOk && compat_rename(probeOld, probeNew) == 0) {
+                    long probeLen = smoke_slot_file_read("PS2_RENAME.OK", 0, (unsigned char*)probeData, sizeof(probeData) - 1);
+                    if (probeLen == (long)(sizeof(payload) - 1)
+                        && memcmp(probeData, payload, sizeof(payload) - 1) == 0) {
+                        SMOKE_LOG("state9: rename probe OK (.TMP -> .OK)");
+                    } else {
+                        smoke_fail("state9: renamed probe content mismatch");
+                        renameOk = false;
+                    }
+                    compat_remove(probeNew);
+                } else {
+                    smoke_fail("state9: rename probe failed");
+                    renameOk = false;
+                    compat_remove(probeOld);
+                    compat_remove(probeNew);
+                }
+
+                if (!renameOk) {
+                    filesOk = false;
+                }
             }
 
             s9_files_ok = filesOk;

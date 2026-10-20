@@ -4,8 +4,9 @@
 #
 # Builds the smoke variant of the ELF (PS2_DEV_SMOKE_TEST=ON, see
 # src/game/ps2_smoke.cc) inside the dedicated fo1-build container, boots it in
-# PCSX2 in strict (no speedhack / no time-stretch) mode, waits for the harness
-# verdict, then shuts PCSX2 down again. Exits 0 on SUITE_FINISHED_SUCCESS.
+# PCSX2 in hyper-strict mode, waits for the harness verdict, then shuts PCSX2
+# down again. Exits 0 only on SUITE_FINISHED_SUCCESS. A TLB Miss, an emulator
+# fault, a timeout or SUITE_FINISHED_WITH_ERRORS is a failure.
 #
 # The complete PCSX2 output (stdout + stderr + -logfile), including IOP
 # console, SIF/RPC and SPU2 debug channels, goes to:
@@ -19,6 +20,11 @@
 # rejected outright.
 #
 # Usage: tools/run_smoke.sh [timeout_seconds]   (default: 600)
+#
+# Environment:
+#   PS2_SMOKE_TIMEOUT   whole-suite timeout in seconds (default: 600)
+#   PS2_SMOKE_FASTMEM   set to 1 only for an A/B diagnostic run (default: 0 =
+#                       strict MMU/TLB path; acceptance requires 0)
 
 set -u
 
@@ -33,7 +39,8 @@ EMULOG="$HOME/.var/app/net.pcsx2.PCSX2/config/PCSX2/logs/emulog.txt"
 PCSX2_INI="$HOME/.var/app/net.pcsx2.PCSX2/config/PCSX2/PCSX2.ini"
 PCSX2_BIN="$HOME/.local/bin/pcsx2-qt"
 FLATPAK_ID="net.pcsx2.PCSX2"
-TIMEOUT="${1:-600}"
+TIMEOUT="${1:-${PS2_SMOKE_TIMEOUT:-600}}"
+FASTMEM="${PS2_SMOKE_FASTMEM:-0}"
 
 say() { printf '[run_smoke] %s\n' "$*"; }
 
@@ -63,7 +70,8 @@ docker exec "$CONTAINER" sh -c \
   "cmake -S /src -B /src/build_ps2_smoke \
      -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-ps2.cmake \
      -DCMAKE_BUILD_TYPE=Release \
-     -DPS2_DEV_SMOKE_TEST=ON" || exit 1
+     -DPS2_DEV_SMOKE_TEST=ON \
+     -DPS2_STRIP_ELF=OFF" || exit 1
 docker exec "$CONTAINER" sh -c "cmake --build /src/build_ps2_smoke -j4" || exit 1
 
 if [ ! -f "$BUILD_DIR/fallout1-ce.elf" ]; then
@@ -149,13 +157,17 @@ if [ ! -f "$PCSX2_INI" ]; then
 fi
 
 cp -f "$PCSX2_INI" "$PCSX2_INI_BACKUP"
-say "applying strict emulation profile (INI backup: $PCSX2_INI_BACKUP)"
+say "applying hyper-strict emulation profile (INI backup: $PCSX2_INI_BACKUP)"
+
+export PS2_SMOKE_FASTMEM="$FASTMEM"
 
 python3 - "$PCSX2_INI" <<'PY' || exit 1
+import os
 import re
 import sys
 
 path = sys.argv[1]
+fastmem = "true" if os.environ.get("PS2_SMOKE_FASTMEM", "0") == "1" else "false"
 
 settings = {
     "EmuCore/Speedhacks": {
@@ -164,8 +176,45 @@ settings = {
         "WaitLoop": "false",
         "vuFlagHack": "false",
         "vu1Instant": "false",
+        "vuThread": "false",
         "IntcStat": "false",
         "fastCDVD": "false",
+    },
+    # Fastmem off reproduces the real EE MMU/TLB path: bad or unaligned
+    # accesses become TLB misses instead of silently succeeding.
+    # Clamp mode 3 = full (overflow + extra overflow + preserve sign).
+    "EmuCore/CPU/Recompiler": {
+        "EnableFastmem": fastmem,
+        "fpuOverflow": "true",
+        "fpuExtraOverflow": "true",
+        "fpuFullMode": "true",
+        "vu0Overflow": "true",
+        "vu0ExtraOverflow": "true",
+        "vu0SignOverflow": "true",
+        "vu0Underflow": "true",
+        "vu1Overflow": "true",
+        "vu1ExtraOverflow": "true",
+        "vu1SignOverflow": "true",
+        "vu1Underflow": "true",
+    },
+    # Round-to-nearest everywhere; DAZ off so denormals are not silently
+    # flushed to zero (strict IEEE-754 / EE FPU behaviour).
+    "EmuCore/CPU": {
+        "FPU.Roundmode": "0",
+        "FPUDiv.Roundmode": "0",
+        "VU0.Roundmode": "0",
+        "VU1.Roundmode": "0",
+        "FPU.DenormalsAreZero": "false",
+        "FPUDiv.DenormalsAreZero": "false",
+        "VU0.DenormalsAreZero": "false",
+        "VU1.DenormalsAreZero": "false",
+    },
+    "EmuCore/Gamefixes": {
+        "InstantDMAHack": "false",
+    },
+    "EmuCore/GS": {
+        "SyncToHostRefreshRate": "false",
+        "UseVSyncForTiming": "false",
     },
     "SPU2/Output": {
         "SyncMode": "Disabled",
@@ -228,6 +277,89 @@ with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
     f.write("\n".join(out) + "\n")
 PY
 
+# Fail loudly if PCSX2's INI schema changes: a silently ignored key would
+# turn the hyper-strict run back into a permissive one without anyone
+# noticing (the suite can still pass while a crash source is masked).
+verify_setting() {
+  local section="$1"
+  local key="$2"
+  local value="$3"
+
+  awk -v want_section="[${section}]" -v want_key="${key}" -v want_value="${value}" '
+    $0 == want_section { in_section = 1; next }
+    /^\[/ { in_section = 0 }
+    in_section {
+      split($0, parts, "=")
+      gsub(/^[ \t]+|[ \t]+$/, "", parts[1])
+      gsub(/^[ \t]+|[ \t]+$/, "", parts[2])
+      if (parts[1] == want_key && parts[2] == want_value) {
+        found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$PCSX2_INI" || {
+    say "ERROR: strict profile not applied: [${section}] ${key} = ${value}"
+    exit 2
+  }
+}
+
+if [ "$FASTMEM" = "1" ]; then
+  say "WARNING: fastmem re-enabled for A/B diagnosis; this is not the acceptance profile"
+  verify_setting "EmuCore/CPU/Recompiler" "EnableFastmem" "true"
+else
+  verify_setting "EmuCore/CPU/Recompiler" "EnableFastmem" "false"
+fi
+
+verify_setting "EmuCore/Speedhacks" "EECycleRate" "0"
+verify_setting "EmuCore/Speedhacks" "EECycleSkip" "0"
+verify_setting "EmuCore/Speedhacks" "WaitLoop" "false"
+verify_setting "EmuCore/Speedhacks" "vuFlagHack" "false"
+verify_setting "EmuCore/Speedhacks" "vu1Instant" "false"
+verify_setting "EmuCore/Speedhacks" "vuThread" "false"
+verify_setting "EmuCore/Speedhacks" "IntcStat" "false"
+verify_setting "EmuCore/Speedhacks" "fastCDVD" "false"
+
+verify_setting "EmuCore/CPU/Recompiler" "fpuOverflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "fpuExtraOverflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "fpuFullMode" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu0Overflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu0ExtraOverflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu0SignOverflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu0Underflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu1Overflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu1ExtraOverflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu1SignOverflow" "true"
+verify_setting "EmuCore/CPU/Recompiler" "vu1Underflow" "true"
+
+verify_setting "EmuCore/CPU" "FPU.Roundmode" "0"
+verify_setting "EmuCore/CPU" "FPUDiv.Roundmode" "0"
+verify_setting "EmuCore/CPU" "VU0.Roundmode" "0"
+verify_setting "EmuCore/CPU" "VU1.Roundmode" "0"
+verify_setting "EmuCore/CPU" "FPU.DenormalsAreZero" "false"
+verify_setting "EmuCore/CPU" "FPUDiv.DenormalsAreZero" "false"
+verify_setting "EmuCore/CPU" "VU0.DenormalsAreZero" "false"
+verify_setting "EmuCore/CPU" "VU1.DenormalsAreZero" "false"
+
+verify_setting "EmuCore/Gamefixes" "InstantDMAHack" "false"
+verify_setting "EmuCore/GS" "SyncToHostRefreshRate" "false"
+verify_setting "EmuCore/GS" "UseVSyncForTiming" "false"
+verify_setting "SPU2/Output" "SyncMode" "Disabled"
+verify_setting "SPU2/Debug" "Global_Enable" "true"
+verify_setting "SPU2/Debug" "Show_Messages" "true"
+verify_setting "SPU2/Debug" "Log_DMA_Transfers" "true"
+verify_setting "SPU2/Debug" "Log_Register_Access" "true"
+verify_setting "Logging" "EnableSystemConsole" "true"
+verify_setting "Logging" "EnableFileLogging" "true"
+verify_setting "Logging" "EnableVerbose" "true"
+verify_setting "Logging" "EnableEEConsole" "true"
+verify_setting "Logging" "EnableIOPConsole" "true"
+
+if [ "$FASTMEM" = "1" ]; then
+  say "strict profile verified (fastmem ON for diagnosis, full FPU/VU clamp, no speedhacks)"
+else
+  say "hyper-strict profile verified (fastmem off, full FPU/VU clamp, no speedhacks)"
+fi
+
 # --------------------------------------------------------------- launch ----
 : > "$STRICT_LOG"
 : > "$CONSOLE_LOG"
@@ -237,25 +369,28 @@ nohup "$PCSX2_BIN" -batch -nogui -logfile "$STRICT_LOG" "$BUILD_DIR/fallout1-ce.
 
 # ---------------------------------------------------------------- wait -----
 VERDICT=""
+CRASH=""
 deadline=$(( $(date +%s) + TIMEOUT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  FOUND=""
-  if [ -f "$STRICT_LOG" ]; then
-    FOUND="$(grep "SUITE_FINISHED" "$STRICT_LOG" 2>/dev/null | tail -n 1)"
-    if [ -z "$FOUND" ] && grep -q "\[ps2\] boot failed" "$STRICT_LOG" 2>/dev/null; then
-      FOUND="[ps2] boot failed"
-    fi
-  fi
-  if [ -z "$FOUND" ] && [ -f "$CONSOLE_LOG" ]; then
-    FOUND="$(grep "SUITE_FINISHED" "$CONSOLE_LOG" 2>/dev/null | tail -n 1)"
-    if [ -z "$FOUND" ] && grep -q "\[ps2\] boot failed" "$CONSOLE_LOG" 2>/dev/null; then
-      FOUND="[ps2] boot failed"
-    fi
-  fi
-  if [ -n "$FOUND" ]; then
-    VERDICT="$FOUND"
+  if grep -Eq "SUITE_FINISHED_(SUCCESS|WITH_ERRORS)" "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null; then
+    VERDICT="$(grep -Eh "SUITE_FINISHED_(SUCCESS|WITH_ERRORS)" "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null \
+      | grep -Eo "SUITE_FINISHED_(SUCCESS|WITH_ERRORS)" | tail -n 1)"
     break
   fi
+
+  if grep -q "\[ps2\] boot failed" "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null; then
+    VERDICT="BOOT_FAILED"
+    break
+  fi
+
+  # With fastmem off, a TLB miss means a real bad access; ReportErrorAsync,
+  # an unaligned jump or a Bus Error are always fatal.
+  if grep -Eq "TLB Miss|ReportErrorAsync|Jump to unaligned address|Bus Error" \
+      "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null; then
+    CRASH="1"
+    break
+  fi
+
   sleep 2
 done
 
@@ -271,6 +406,28 @@ fi
 
 restore_environment
 trap - EXIT INT TERM
+
+# ------------------------------------------------- hardware fault report ----
+TLB_COUNT="$( (grep -hc "TLB Miss" "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null || true) \
+  | awk '{s += $1} END {print s + 0}')"
+
+FAULT_LINES="$(grep -Eh "TLB Miss|ReportErrorAsync|Jump to unaligned address|Bus Error" \
+  "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null | awk '!seen[$0]++' || true)"
+
+if [ "$TLB_COUNT" -gt 0 ]; then
+  say "FAIL: $TLB_COUNT EE TLB miss line(s) with fastmem off"
+  grep -Eh "TLB Miss" "$STRICT_LOG" "$CONSOLE_LOG" 2>/dev/null \
+    | awk '!seen[$0]++' | head -n 20 || true
+  exit 1
+fi
+
+if [ -n "$CRASH" ] || [ -n "$FAULT_LINES" ]; then
+  say "FATAL: emulator hardware fault under the strict profile"
+  if [ -n "$FAULT_LINES" ]; then
+    printf '%s\n' "$FAULT_LINES" | head -n 20
+  fi
+  exit 1
+fi
 
 # ------------------------------------------------- save slot (F6, host) ----
 # Dev builds keep the F6 save shim on the host, so slot 1 must be visible
@@ -293,8 +450,8 @@ fi
 
 # --------------------------------------------------------------- report ----
 if [ -f "$STRICT_LOG" ]; then
-  say "strict output (ps2/debug/IOP/SPU2 lines):"
-  grep -E "ps2dbg|\[ps2\]|IOP|SPU2|SIF|FileIO" "$STRICT_LOG" | tail -n 200 || true
+  say "filtered output (ps2/debug/IOP/SPU2/SIF/perf lines):"
+  grep -E "ps2dbg|\[ps2\]|\[PERF\]|IOP|SPU2|SIF|FileIO" "$STRICT_LOG" | tail -n 200 || true
 fi
 
 if [ -z "$VERDICT" ]; then
@@ -304,7 +461,7 @@ if [ -z "$VERDICT" ]; then
   exit 2
 fi
 
-if printf '%s' "$VERDICT" | grep -q "SUITE_FINISHED_SUCCESS"; then
+if [ "$VERDICT" = "SUITE_FINISHED_SUCCESS" ]; then
   say "RESULT: SUCCESS"
   exit 0
 fi
