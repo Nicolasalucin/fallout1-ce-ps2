@@ -45,7 +45,8 @@ docker exec "$CONTAINER" sh -c \
   "cmake -S /src -B /src/build_ps2_release \
      -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-ps2.cmake \
      -DCMAKE_BUILD_TYPE=Release \
-     -DPS2_DEV_SMOKE_TEST=OFF" || exit 1
+     -DPS2_DEV_SMOKE_TEST=OFF \
+     -DPS2_STRIP_ELF=OFF" || exit 1
 docker exec "$CONTAINER" sh -c "cmake --build /src/build_ps2_release -j4" || exit 1
 
 if [ ! -f "$BUILD_DIR/fallout1-ce.elf" ]; then
