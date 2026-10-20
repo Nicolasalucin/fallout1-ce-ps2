@@ -93,7 +93,18 @@ extern void* _gp;
 #define PS2_AUDIO_CHANNELS 2
 #define PS2_AUDIO_BYTES_PER_FRAME ((PS2_AUDIO_BITS / 8) * PS2_AUDIO_CHANNELS)
 #define PS2_AUDIO_MAX_SAMPLES 2048
-#define PS2_AUDIO_STACK_SIZE (16 * 1024)
+
+/* The worker mixes and copies chunks, so it needs real stack headroom: the
+ * EE default is 4 KB and the mixer callback (SDL_AudioStream conversions)
+ * can recurse deeper than the old 16 KB budget accounted for. 32 KB is the
+ * documented safe floor for EE threads; 16-byte alignment is mandatory for
+ * the R5900 stack pointer (quadword loads/stores). */
+#define PS2_AUDIO_STACK_SIZE (32 * 1024)
+
+/* Bounce buffer for every audsrv_play_audio() dispatch. See the notes in
+ * ps2_audio_feed_safe(): 64-byte alignment and cache write-back are required
+ * for SIF DMA, and 4 KB keeps the copy hot in the 8 KB D-cache. */
+#define PS2_AUDIO_BOUNCE_SIZE 4096
 
 static ps2_audio_callback_t s_callback;
 static void* s_userdata;
@@ -116,6 +127,7 @@ static int s_dummy;
 
 /* 64-byte aligned so DMA-bound copies stay fast; S16 stereo. */
 static unsigned char s_chunk_buffer[PS2_AUDIO_MAX_SAMPLES * PS2_AUDIO_BYTES_PER_FRAME] __attribute__((aligned(64)));
+static unsigned char s_audio_bounce[PS2_AUDIO_BOUNCE_SIZE] __attribute__((aligned(64)));
 static unsigned char s_thread_stack[PS2_AUDIO_STACK_SIZE] __attribute__((aligned(16)));
 
 /* Finished chunks travel from the mixer thread to the engine thread here.
@@ -184,6 +196,44 @@ static void audio_worker(void* arg)
     ExitDeleteThread();
 }
 
+/* Push PCM to audsrv through the aligned bounce buffer.
+ *
+ * audsrv_play_audio() currently copies the caller's bytes into its own
+ * 64-byte-aligned RPC buffer, so direct dispatch happens to work. This
+ * wrapper makes the guarantee independent of that implementation detail and
+ * is the only dispatch path in this file: every transfer is quadword-safe,
+ * cache-coherent and stereo-frame aligned even if a future caller hands us
+ * an odd pointer or byte count. */
+static void ps2_audio_feed_safe(const void* data, int size)
+{
+    const unsigned char* ptr = (const unsigned char*)data;
+
+    if (ptr == NULL || size <= 0) {
+        return;
+    }
+
+    while (size > 0) {
+        int chunk = (size > (int)sizeof(s_audio_bounce)) ? (int)sizeof(s_audio_bounce) : size;
+
+        /* Stereo S16 frames are 4 bytes: never split one across transfers. */
+        chunk &= ~3;
+        if (chunk == 0) {
+            break;
+        }
+
+        memcpy(s_audio_bounce, ptr, (size_t)chunk);
+
+        /* Write back exactly the range the DMAC will fetch; a full-cache
+         * flush would also evict unrelated mixer/FMV lines. */
+        SyncDCache(s_audio_bounce, s_audio_bounce + chunk);
+
+        audsrv_play_audio((const char*)s_audio_bounce, chunk);
+
+        ptr += chunk;
+        size -= chunk;
+    }
+}
+
 void ps2_audio_pump(void)
 {
     static uint32_t s_last_pump_ms;
@@ -221,7 +271,7 @@ void ps2_audio_pump(void)
             break;
         }
 
-        audsrv_play_audio((const char*)s_ring[s_ring_head % PS2_AUDIO_RING_CHUNKS], s_chunk_bytes);
+        ps2_audio_feed_safe(s_ring[s_ring_head % PS2_AUDIO_RING_CHUNKS], s_chunk_bytes);
 
         __asm__ volatile("" ::: "memory");
         s_ring_head++;
@@ -231,27 +281,59 @@ void ps2_audio_pump(void)
 
 /* audsrv's RPC server runs on the IOP; a successful bind means the module
  * actually started and its server thread registered, i.e. audsrv_init() can
- * no longer hang waiting for it. wait_ms <= 0 means "check once". */
+ * no longer hang waiting for it.
+ *
+ * The bind itself is non-blocking and its reply is polled with a bounded wait.
+ * A blocking sceSifBindRpc() parks the thread on a semaphore signalled by the
+ * SIF completion handler; if a completion is ever lost - which happens on
+ * PCSX2 under heavy I/O; see the file header - that wait never returns and the
+ * boot hangs here. Polling turns a lost completion into "audio unavailable"
+ * instead.
+ *
+ * The client data is static because the IOP's reply carries a pointer to it,
+ * so it must stay valid until the completion is processed. A new bind may only
+ * be sent once the previous one completed; the completion releases the packet
+ * (hdr.pkt_addr back to NULL), which is also how "bound, no server was
+ * listening" is told apart from "still in flight". */
+static SifRpcClientData_t s_bind_cd;
+static int s_bind_inflight;
+
+static void audsrv_bind_start(void)
+{
+    if (s_bind_cd.server != NULL) {
+        return;
+    }
+
+    if (s_bind_inflight) {
+        if (s_bind_cd.hdr.pkt_addr != NULL) {
+            return;
+        }
+        s_bind_inflight = 0;
+    }
+
+    memset(&s_bind_cd, 0, sizeof(s_bind_cd));
+    if (sceSifBindRpc(&s_bind_cd, AUDSRV_IRX, SIF_RPC_M_NOWAIT) >= 0) {
+        s_bind_inflight = (s_bind_cd.hdr.pkt_addr != NULL);
+    }
+}
+
 static int audsrv_server_is_up(int wait_ms)
 {
-    SifRpcClientData_t cd;
-    unsigned int start;
-
-    memset(&cd, 0, sizeof(cd));
-    start = ps2_time_ms();
+    unsigned int start = ps2_time_ms();
 
     for (;;) {
-        sceSifBindRpc(&cd, AUDSRV_IRX, 0);
-        if (cd.server != NULL) {
+        if (s_bind_cd.server != NULL) {
             return 1;
         }
+
+        audsrv_bind_start();
 
         if (wait_ms <= 0 || (int)(ps2_time_ms() - start) >= wait_ms) {
             return 0;
         }
 
-        /* Sleep between binds: the EE kernel never preempts a spinning
-         * thread, so even this pre-worker wait must yield. */
+        /* The reply is processed from the SIF command interrupt, so sleeping
+         * is enough to let it land; a spinning thread would starve it. */
         DelayThread(1000);
     }
 }
