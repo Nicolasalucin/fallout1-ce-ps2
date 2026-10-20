@@ -9,6 +9,7 @@
 
 #include "ps2_save.h"
 #include "ps2_storage.h"
+#include "ps2_time.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -45,11 +46,15 @@ static int s_probed;
  * harness. */
 unsigned int ps2_fs_stat_fopen_calls;
 unsigned int ps2_fs_stat_canonicalize_calls;
+unsigned int ps2_fs_stat_dir_cache_hits;
+unsigned int ps2_fs_stat_dir_scans;
 
 void ps2_fs_stat_reset(void)
 {
     ps2_fs_stat_fopen_calls = 0;
     ps2_fs_stat_canonicalize_calls = 0;
+    ps2_fs_stat_dir_cache_hits = 0;
+    ps2_fs_stat_dir_scans = 0;
 }
 #endif
 
@@ -70,6 +75,400 @@ static DIR* fs_opendir(const char* dir)
     }
 
     return d;
+}
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* The dialog tree is the largest directory the engine resolves during map
+ * load and the one that intermittently wedges in PCSX2's host filesystem
+ * HLE. Keep a per-entry trace here, but only for that tree, so a full boot
+ * log stays readable. Fallout 1 media uses uppercase names, so match the
+ * needle case-insensitively. */
+static int fs_trace_dialog_dir(const char* dir)
+{
+    static const char needle[] = "data/text/english/dialog";
+    const char* p;
+
+    if (dir == NULL) {
+        return 0;
+    }
+
+    for (p = dir; *p != '\0'; p++) {
+        if (strncasecmp(p, needle, sizeof(needle) - 1) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static struct dirent* fs_trace_readdir(DIR* d, const char* dir, int index)
+{
+    struct dirent* entry;
+
+    if (!fs_trace_dialog_dir(dir)) {
+        return readdir(d);
+    }
+
+    printf("[ps2] fs: dialog readdir #%d begin\n", index);
+    entry = readdir(d);
+    if (entry != NULL) {
+        printf("[ps2] fs: dialog readdir #%d -> '%s' (type %d)\n",
+            index, entry->d_name, (int)entry->d_type);
+    } else {
+        printf("[ps2] fs: dialog readdir #%d -> NULL\n", index);
+    }
+
+    return entry;
+}
+#else
+#define fs_trace_readdir(d, dir, index) readdir(d)
+#endif
+
+/* --- Directory listing cache -------------------------------------------
+ *
+ * Resolving a path component through readdir() costs a dopen/readdir/close
+ * RPC round trip to the IOP. The engine resolves thousands of art/proto
+ * paths through several roots during boot, and the PCSX2 host filesystem HLE
+ * is known to corrupt its SIF RPC bookkeeping under exactly that burst
+ * (stray request completions, later seen as boot hangs/crashes).
+ *
+ * Keep recent listings in one fixed EE arena: a resolution costs no IOP call
+ * until the directory is written to (save files) or the cached listing goes
+ * stale. Large directories (ART/INTRFACE, the dialog tree) are cached too;
+ * names are stored compactly and total memory is bounded by the arena.
+ */
+#define PS2_FS_DIR_CACHE_SLOTS 96
+#define PS2_FS_DIR_CACHE_TTL_MS 30000
+/* 320 KB of static arena. It lives in .bss, so every byte taken here is
+ * taken from the engine heap, but the arena also decides how often the whole
+ * listing cache is dropped: shrinking it too far trades a few KB of heap for
+ * a lot of extra dopen/readdir RPC traffic. */
+#define PS2_FS_DIR_CACHE_ARENA (320 * 1024)
+#define PS2_FS_DIR_CACHE_NAME_MAX 255
+/* Safety valve for a driver that never returns NULL from readdir(). A
+ * legitimate listing (the dialog tree is the largest one in the game data)
+ * is far below this limit. */
+#define PS2_FS_DIR_CACHE_MAX_ENTRIES 4096
+
+typedef struct {
+    char path[PS2_FS_PATH_MAX];
+    unsigned int stamp; /* ps2_time_ms() when the listing was taken */
+    int valid;
+    int count; /* entries in the listing */
+    int offset; /* first entry, as an offset into the arena */
+    int bytes; /* arena bytes used by the listing */
+} fs_dir_cache_slot_t;
+
+/* Listing entries sit one after another in the arena: one kind byte
+ * (PS2_FS_KIND_*) followed by the NUL-terminated file name. */
+static fs_dir_cache_slot_t s_dir_cache[PS2_FS_DIR_CACHE_SLOTS];
+static unsigned char s_dir_arena[PS2_FS_DIR_CACHE_ARENA];
+static int s_dir_arena_used;
+static int s_dir_cache_next;
+
+/* Call after anything changed a directory: new files (saves), removed files,
+ * new mods. Cheap enough (a few flags) to call on every write open. The arena
+ * is rewound as well: no directory iterator can be live across a file open
+ * (canonicalization parses paths only). */
+static void fs_dir_cache_invalidate(void)
+{
+    int i;
+
+    for (i = 0; i < PS2_FS_DIR_CACHE_SLOTS; i++) {
+        s_dir_cache[i].valid = 0;
+    }
+
+    s_dir_arena_used = 0;
+}
+
+/* Drops every cached listing on behalf of the layers that change directories
+ * behind this module's back. The save-slot wipe uses this: it removes whole
+ * slot directories, so there is nothing specific to keep. */
+void ps2_fs_invalidate_dir_cache(void)
+{
+    fs_dir_cache_invalidate();
+}
+
+/* Slot keys keep the mount point spelling of the path they were built from
+ * ("dev:" or "dev:/"), so directories are compared ignoring one trailing
+ * separator. */
+static int fs_path_same(const char* a, const char* b)
+{
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+
+    while (len_a > 0 && a[len_a - 1] == '/') {
+        len_a--;
+    }
+    while (len_b > 0 && b[len_b - 1] == '/') {
+        len_b--;
+    }
+
+    return len_a == len_b && strncasecmp(a, b, len_a) == 0;
+}
+
+/* Drops the listing of `dir` only. A directory listing changes when a file
+ * inside it appears, goes away or is renamed, and nothing else, so that is
+ * the only thing the writers above this module need to invalidate. Flushing
+ * the whole cache instead would send every following resolution back to the
+ * IOP during a save. */
+static void fs_dir_cache_invalidate_dir(const char* dir)
+{
+    int i;
+
+    for (i = 0; i < PS2_FS_DIR_CACHE_SLOTS; i++) {
+        fs_dir_cache_slot_t* slot = &s_dir_cache[i];
+
+        if (slot->valid && fs_path_same(slot->path, dir)) {
+            slot->valid = 0;
+        }
+    }
+}
+
+/* Invalidates the listing of the directory holding `resolved` (a canonical
+ * device path such as "mc0:/FALLOUT1_S01/SAVE.DAT"). */
+void ps2_fs_invalidate_parent_of(const char* resolved)
+{
+    const char* slash;
+    char dir[PS2_FS_PATH_MAX];
+    size_t len;
+
+    if (resolved == NULL) {
+        return;
+    }
+
+    slash = strrchr(resolved, '/');
+    if (slash == NULL || slash == resolved) {
+        return;
+    }
+
+    len = (size_t)(slash - resolved);
+    if (len >= sizeof(dir)) {
+        return;
+    }
+
+    memcpy(dir, resolved, len);
+    dir[len] = '\0';
+
+    fs_dir_cache_invalidate_dir(dir);
+}
+
+static unsigned char fs_dirent_kind(const struct dirent* entry)
+{
+    if (entry->d_type == DT_DIR) {
+        return PS2_FS_KIND_DIR;
+    }
+    if (entry->d_type == DT_UNKNOWN) {
+        return PS2_FS_KIND_UNKNOWN;
+    }
+    return PS2_FS_KIND_FILE;
+}
+
+static fs_dir_cache_slot_t* fs_dir_cache_lookup(const char* dir)
+{
+    unsigned int now = ps2_time_ms();
+    int i;
+
+    for (i = 0; i < PS2_FS_DIR_CACHE_SLOTS; i++) {
+        fs_dir_cache_slot_t* slot = &s_dir_cache[i];
+
+        if (!slot->valid || strcmp(slot->path, dir) != 0) {
+            continue;
+        }
+
+        if ((unsigned int)(now - slot->stamp) > PS2_FS_DIR_CACHE_TTL_MS) {
+            slot->valid = 0;
+            return NULL;
+        }
+
+        return slot;
+    }
+
+    return NULL;
+}
+
+/* Lists `dir` into the next round-robin slot. Returns NULL when the directory
+ * cannot be listed or does not fit in the arena (the caller then iterates it
+ * directly). */
+static fs_dir_cache_slot_t* fs_dir_cache_fill(const char* dir)
+{
+    fs_dir_cache_slot_t* slot;
+    struct dirent* entry;
+    DIR* d;
+    int start;
+    int count = 0;
+    int index = 0;
+#ifdef PS2_DEV_SMOKE_TEST
+    int trace = 0;
+#endif
+
+    /* Reclaim the arena in one go once it is mostly used: listings are only
+     * re-read on demand, so dropping all of them is cheap. */
+    if (s_dir_arena_used > PS2_FS_DIR_CACHE_ARENA * 3 / 4) {
+        fs_dir_cache_invalidate();
+    }
+
+    d = fs_opendir(dir);
+    if (d == NULL) {
+        return NULL;
+    }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    trace = fs_trace_dialog_dir(dir);
+    if (trace) {
+        printf("[ps2] fs: dialog dopen %s -> ok\n", dir);
+    }
+#endif
+
+    start = s_dir_arena_used;
+
+    while ((entry = fs_trace_readdir(d, dir, index)) != NULL) {
+        size_t len;
+
+        if (count >= PS2_FS_DIR_CACHE_MAX_ENTRIES) {
+            count = -1;
+            break;
+        }
+
+        len = strlen(entry->d_name) + 1;
+        if (len > PS2_FS_DIR_CACHE_NAME_MAX
+            || s_dir_arena_used + 1 + (int)len > PS2_FS_DIR_CACHE_ARENA) {
+            count = -1;
+            break;
+        }
+
+        s_dir_arena[s_dir_arena_used++] = fs_dirent_kind(entry);
+        memcpy(&s_dir_arena[s_dir_arena_used], entry->d_name, len);
+        s_dir_arena_used += (int)len;
+        count++;
+        index++;
+    }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    if (trace) {
+        printf("[ps2] fs: dialog dclose %s after %d entries (count=%d)\n",
+            dir, index, count);
+    }
+#endif
+    closedir(d);
+#ifdef PS2_DEV_SMOKE_TEST
+    if (trace) {
+        printf("[ps2] fs: dialog dclose %s done\n", dir);
+    }
+#endif
+
+    if (count < 0) {
+        s_dir_arena_used = start;
+        return NULL;
+    }
+
+    slot = &s_dir_cache[s_dir_cache_next];
+    s_dir_cache_next = (s_dir_cache_next + 1) % PS2_FS_DIR_CACHE_SLOTS;
+    slot->valid = 0;
+    snprintf(slot->path, sizeof(slot->path), "%s", dir);
+    slot->count = count;
+    slot->offset = start;
+    slot->bytes = s_dir_arena_used - start;
+    slot->stamp = ps2_time_ms();
+    slot->valid = 1;
+
+    return slot;
+}
+
+typedef struct {
+    const fs_dir_cache_slot_t* slot; /* cached listing, when available */
+    int index;
+    int cursor; /* arena offset of the next entry (cached listings) */
+    DIR* dir; /* direct iteration, when the directory is not cacheable */
+    const char* dir_path; /* caller's path, for the diagnostic trace */
+    int readdir_index;
+} fs_dir_iter_t;
+
+static int fs_dir_iter_begin(fs_dir_iter_t* it, const char* dir)
+{
+    const fs_dir_cache_slot_t* slot = fs_dir_cache_lookup(dir);
+
+    it->slot = NULL;
+    it->index = 0;
+    it->cursor = 0;
+    it->dir = NULL;
+    it->dir_path = dir;
+    it->readdir_index = 0;
+
+    if (slot == NULL) {
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_fs_stat_dir_scans++;
+#endif
+        slot = fs_dir_cache_fill(dir);
+    } else {
+#ifdef PS2_DEV_SMOKE_TEST
+        ps2_fs_stat_dir_cache_hits++;
+#endif
+    }
+
+    if (slot != NULL) {
+        it->slot = slot;
+        it->cursor = slot->offset;
+        return 0;
+    }
+
+    it->dir = fs_opendir(dir);
+    if (it->dir == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Returns the next entry name and stores its kind, or NULL at the end. */
+static const char* fs_dir_iter_next(fs_dir_iter_t* it, unsigned char* kind)
+{
+    if (it->slot != NULL) {
+        const char* name;
+
+        if (it->index >= it->slot->count) {
+            return NULL;
+        }
+
+        *kind = s_dir_arena[it->cursor];
+        name = (const char*)&s_dir_arena[it->cursor + 1];
+        it->cursor += 1 + (int)strlen(name) + 1;
+        it->index++;
+
+        return name;
+    }
+
+    {
+        struct dirent* entry;
+
+        /* The direct fallback is used when the listing did not fit the cache
+         * (or hit the runaway guard above); keep the same bound here so a
+         * broken driver cannot trap the resolver in an endless scan. */
+        if (it->readdir_index >= PS2_FS_DIR_CACHE_MAX_ENTRIES) {
+            return NULL;
+        }
+
+        entry = fs_trace_readdir(it->dir, it->dir_path, it->readdir_index++);
+        if (entry == NULL) {
+            return NULL;
+        }
+
+        *kind = fs_dirent_kind(entry);
+        return entry->d_name;
+    }
+}
+
+static void fs_dir_iter_end(fs_dir_iter_t* it)
+{
+    if (it->dir != NULL) {
+#ifdef PS2_DEV_SMOKE_TEST
+        if (fs_trace_dialog_dir(it->dir_path)) {
+            printf("[ps2] fs: dialog iter dclose %s\n", it->dir_path);
+        }
+#endif
+        closedir(it->dir);
+        it->dir = NULL;
+    }
 }
 
 /* Copies `path` into `out` normalizing separators: backslashes to slashes,
@@ -235,8 +634,9 @@ int ps2_fs_canonicalize(char* path, int allow_missing_last)
         char match[PS2_FS_PATH_MAX];
         int found = 0;
         int last = sep == NULL;
-        DIR* d;
-        struct dirent* entry;
+        fs_dir_iter_t it;
+        const char* name;
+        unsigned char kind;
 
         if (comp_len == 0) {
             p = sep + 1;
@@ -263,21 +663,20 @@ int ps2_fs_canonicalize(char* path, int allow_missing_last)
             continue;
         }
 
-        d = fs_opendir(dir);
-        if (d == NULL) {
+        if (fs_dir_iter_begin(&it, dir) != 0) {
             return -1;
         }
 
         match[0] = '\0';
-        while ((entry = readdir(d)) != NULL) {
-            if (strlen(entry->d_name) == comp_len
-                && strncasecmp(p, entry->d_name, comp_len) == 0) {
-                snprintf(match, sizeof(match), "%s", entry->d_name);
+        while ((name = fs_dir_iter_next(&it, &kind)) != NULL) {
+            if (strlen(name) == comp_len
+                && strncasecmp(p, name, comp_len) == 0) {
+                snprintf(match, sizeof(match), "%s", name);
                 found = 1;
                 break;
             }
         }
-        closedir(d);
+        fs_dir_iter_end(&it);
 
         /* Missing component: keep the requested spelling when the caller
          * allows creating the file, otherwise fail the resolution.
@@ -330,6 +729,14 @@ static FILE* fs_do_open(const char* path, const char* mode, int writable)
             /* Block-read buffering for the big datafiles. */
             setvbuf(f, NULL, _IOFBF, PS2_FS_DAT_BUFSIZE);
         }
+    }
+
+    if (f != NULL && writable) {
+        /* The listing of the directory this file lives in is stale now: it
+         * was cached while resolving the path, before the file existed (a
+         * save written and read back immediately). Every other listing stays
+         * valid, so the next resolution does not have to scan it again. */
+        ps2_fs_invalidate_parent_of(path);
     }
 
     return f;

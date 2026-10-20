@@ -483,6 +483,10 @@ int ps2_save_slot_wipe(int slot)
 
     ps2_save_init();
 
+    /* The listing of the slot directory and its parent may be cached from
+     * the load/save UI. Drop them before resolving and erasing. */
+    ps2_fs_invalidate_dir_cache();
+
     save_slot_dir(slot, dir, sizeof(dir));
 
     /* The on-card spelling may differ in case; try to canonicalize first. */
@@ -515,6 +519,10 @@ int ps2_save_slot_wipe(int slot)
 
     remove(resolved);
     rmdir(resolved);
+
+    /* The wiped names are gone now; a listing cached while resolving them
+     * would still return them. */
+    ps2_fs_invalidate_dir_cache();
 
     printf("[ps2] save: wiped slot %02d (%d files)\n", slot, removed);
     return 0;

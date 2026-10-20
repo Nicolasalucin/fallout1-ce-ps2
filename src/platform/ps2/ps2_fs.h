@@ -55,10 +55,36 @@ int ps2_fs_resolve(const char* path, char* out, int out_size, int writable);
  * the file cannot be found in any root. */
 FILE* ps2_fs_fopen(const char* path, const char* mode);
 
+/* Kinds of a directory entry, taken from readdir()'s d_type. */
+#define PS2_FS_KIND_UNKNOWN 0
+#define PS2_FS_KIND_FILE 1
+#define PS2_FS_KIND_DIR 2
+
 /* In-place case-insensitive canonicalization of a device path such as
  * "host:local_assets/master.dat". When `allow_missing_last` is non-zero the
  * final component may be absent (for creating files). Returns 0 on success. */
 int ps2_fs_canonicalize(char* path, int allow_missing_last);
+
+/* Drops every cached directory listing (the save-slot wipe removes whole
+ * directories). */
+void ps2_fs_invalidate_dir_cache(void);
+
+/* Drops the cached listing of the directory holding `resolved` (a canonical
+ * device path). compat_mkdir/compat_remove/compat_rename call this after
+ * changing a directory outside the fopen() path. */
+void ps2_fs_invalidate_parent_of(const char* resolved);
+
+#ifdef PS2_DEV_SMOKE_TEST
+/* Dev profiling counters: how much directory resolution work the engine
+ * caused. Reported by the smoke suite so VFS changes can be told apart from
+ * rendering work. */
+extern unsigned int ps2_fs_stat_fopen_calls;
+extern unsigned int ps2_fs_stat_canonicalize_calls;
+extern unsigned int ps2_fs_stat_dir_cache_hits;
+extern unsigned int ps2_fs_stat_dir_scans;
+
+void ps2_fs_stat_reset(void);
+#endif
 
 #ifdef __cplusplus
 }
