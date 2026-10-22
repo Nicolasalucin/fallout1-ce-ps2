@@ -6,6 +6,7 @@
  */
 
 #include "ps2_fs.h"
+#include "ps2_debug.h"
 
 #include "ps2_save.h"
 #include "ps2_storage.h"
@@ -17,6 +18,8 @@
 #include <string.h>
 #include <strings.h> /* strncasecmp */
 #include <unistd.h>
+
+#include <delaythread.h>
 
 #define PS2_FS_MAX_ROOTS 12
 #define PS2_FS_ROOT_MAX 40
@@ -40,6 +43,8 @@ static const char* const s_candidates[] = {
 static char s_roots[PS2_FS_MAX_ROOTS][PS2_FS_ROOT_MAX];
 static int s_root_count;
 static int s_probed;
+
+#include <delaythread.h>
 
 #ifdef PS2_DEV_SMOKE_TEST
 /* TEMP profiling (F5.2 map load): I/O call counters consumed by the smoke
@@ -561,7 +566,11 @@ void ps2_fs_init(void)
         return;
     }
 
-    printf("[ps2] fs: WARNING no game data root found\n");
+    printf("[ps2] fs: FATAL no game data root found\n");
+    PS2_LOG("[ps2] fs: FATAL no game data root found");
+    fflush(stdout);
+    fflush(stderr);
+    DelayThread(3000000);  /* 3 s pause so the user can read the message */
 
     /* Temporary F4 diagnostics: what does the PCSX2 host: root expose? */
     {
