@@ -252,11 +252,11 @@ void ps2_video_init(void)
     s_texture.Filter = GS_FILTER_NEAREST;
     gsKit_setup_tbw(&s_texture);
     s_texture.Vram = gsKit_vram_alloc(s_gs,
-        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GS_VRAM_BLOCKSIZE_256);
+        gsKit_texture_size(PS2_SCR_W, PS2_SCR_H, GS_PSM_CT32), GSKIT_ALLOC_USERBUFFER);
     s_texture.Mem = (u32*)s_fb_rgba;
 
-    if (s_texture.Vram == 0) {
-        PS2_LOG("[ps2] video: gsKit_vram_alloc returned 0");
+    if (s_texture.Vram == GSKIT_ALLOC_ERROR) {
+        PS2_LOG("[ps2] video: gsKit_vram_alloc returned GSKIT_ALLOC_ERROR");
         ps2_fatal_show("GS VRAM ALLOCATION FAILED",
             "gsKit could not reserve the 640x480 CT32 texture.",
             "VRAM is fragmented or the GS is not responding.",
