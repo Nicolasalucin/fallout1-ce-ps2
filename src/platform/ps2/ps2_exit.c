@@ -71,6 +71,14 @@ void ps2_fatal_show(const char* title,
         line2 != NULL ? line2 : "",
         line3 != NULL ? line3 : "");
 
+    /* Commit the log before the screen holds the console for several seconds.
+     * On ps2sdk FAT32 fflush() alone does not update the directory entry; the
+     * close/reopen in ps2_debug_sync() does. If stdout was never redirected
+     * this is a no-op and the per-line logger has already closed every line. */
+    ps2_debug_sync();
+    fflush(stdout);
+    fflush(stderr);
+
     if (hold_ms < 1000) {
         hold_ms = 1000;
     }
@@ -96,6 +104,7 @@ void ps2_exit_to_loader(int status)
     int i;
 
     PS2_LOG("[ps2] exit: returning to loader (status %d)", status);
+    ps2_debug_sync();
     ps2_debug_flush_all();
 
 #ifdef PS2_DEV_SMOKE_TEST

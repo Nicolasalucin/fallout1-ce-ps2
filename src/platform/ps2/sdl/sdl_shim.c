@@ -593,6 +593,11 @@ void SDL_RenderPresent(SDL_Renderer* renderer)
      * ps2_audio.h). Doing it here guarantees a feed even on frames where
      * the engine skips the event pump. */
     ps2_audio_pump();
+
+    /* Throttled to PS2_DEBUG_SYNC_MS: pushes the platform log past the
+     * usbhdfsd write-back cache so a black screen cannot swallow the last
+     * seconds of output (see ps2_debug.h). No-op before the redirect. */
+    ps2_debug_tick();
 }
 
 /* ---------------------------------------------------------------------- */
