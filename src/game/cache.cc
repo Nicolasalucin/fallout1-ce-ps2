@@ -1,6 +1,7 @@
 #include "game/cache.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,21 @@
 namespace fallout {
 
 #define CACHE_LOOKUP_SIZE 1024
-static int s_cacheLookup[CACHE_LOOKUP_SIZE];
+
+/* Direct-mapped key -> index hint for the sorted cache entry array. The hint
+ * is bound to a specific Cache instance: art and sound caches can use the
+ * same integer keys, and a global index-only table would either return a
+ * false hit from the wrong cache or force a full O(n) rebuild after every
+ * insert/purge. The slot is validated against the live entry (instance,
+ * key, bounds, key match), so stale hints after a memmove only cost one
+ * binary search. */
+typedef struct CacheLookupSlot {
+    Cache* cache;
+    int key;
+    int index;
+} CacheLookupSlot;
+
+static CacheLookupSlot s_cacheLookup[CACHE_LOOKUP_SIZE];
 
 static bool cache_add(Cache* cache, int key, int* indexPtr);
 static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index);
@@ -25,7 +40,8 @@ static bool cache_reset_counter(Cache* cache);
 static bool cache_make_room(Cache* cache, int size);
 static bool cache_purge(Cache* cache);
 static bool cache_resize_array(Cache* cache, int newCapacity);
-static void cache_rebuild_lookup(Cache* cache);
+static unsigned int cache_lookup_hash(Cache* cache, int key);
+static void cache_lookup_clear(Cache* cache);
 static int cache_compare_make_room(const void* a1, const void* a2);
 static int cache_compare_reset_counter(const void* a1, const void* a2);
 
@@ -55,7 +71,9 @@ bool cache_init(Cache* cache, CacheSizeProc* sizeProc, CacheReadProc* readProc, 
 
     memset(cache->entries, 0, sizeof(*cache->entries) * cache->entriesCapacity);
 
-    for (int i = 0; i < CACHE_LOOKUP_SIZE; i++) s_cacheLookup[i] = -1;
+    /* Drop stale hints for this instance (a Cache object can be reused after
+     * cache_exit). Other caches keep their slots. */
+    cache_lookup_clear(cache);
 
     return true;
 }
@@ -85,6 +103,11 @@ bool cache_exit(Cache* cache)
     cache->sizeProc = NULL;
     cache->readProc = NULL;
     cache->freeProc = NULL;
+
+    /* A later Cache object may be allocated at the same address; remove every
+     * hint that still points at this instance so it cannot produce a false
+     * hit before the new owner has populated its entries. */
+    cache_lookup_clear(cache);
 
     return true;
 }
@@ -478,7 +501,16 @@ static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index)
     cache->entriesLength++;
     cache->size += cacheEntry->size;
 
-    cache_rebuild_lookup(cache);
+    /* Publish the new index for O(1) hits. Inserting shifts every entry above
+     * the insertion point; their slots become stale but stay safe because
+     * cache_find() re-validates the live entry before using a hint. */
+    {
+        CacheLookupSlot* slot = &s_cacheLookup[cache_lookup_hash(cache, cacheEntry->key)];
+        slot->cache = cache;
+        slot->key = cacheEntry->key;
+        slot->index = index;
+    }
+
     return true;
 }
 
@@ -490,15 +522,17 @@ static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index)
 // 0x41F354
 static int cache_find(Cache* cache, int key, int* indexPtr)
 {
-    /* Direct-mapped lookup table (O(1) with fallback to binary search). */
-    int idx = key & (CACHE_LOOKUP_SIZE - 1);
-    int cached = s_cacheLookup[idx];
-    if (cached >= 0 && cached < cache->entriesLength) {
-        if (cache->entries[cached]->key == key) {
+    /* Direct-mapped lookup table (O(1) with fallback to binary search). The
+     * slot is validated against the live entry: after an insertion or purge
+     * the cached index may be stale, but it can never produce a wrong hit. */
+    CacheLookupSlot* slot = &s_cacheLookup[cache_lookup_hash(cache, key)];
+    if (slot->cache == cache && slot->key == key) {
+        int cached = slot->index;
+        if (cached >= 0 && cached < cache->entriesLength
+            && cache->entries[cached]->key == key) {
             *indexPtr = cached;
             return 2;
         }
-        /* Collision: fall through to binary search. */
     }
 
     int length = cache->entriesLength;
@@ -518,8 +552,10 @@ static int cache_find(Cache* cache, int key, int* indexPtr)
         cmp = key - cache->entries[mid]->key;
         if (cmp == 0) {
             *indexPtr = mid;
-            /* Repair lookup table for next hit. */
-            s_cacheLookup[idx] = mid;
+            /* Repair this one slot for the next hit. */
+            slot->cache = cache;
+            slot->key = key;
+            slot->index = mid;
             return 2;
         }
 
@@ -704,14 +740,21 @@ static bool cache_make_room(Cache* cache, int size)
 }
 
 // 0x41F69C
-static void cache_rebuild_lookup(Cache* cache)
+static unsigned int cache_lookup_hash(Cache* cache, int key)
+{
+    unsigned int hash = (unsigned int)key * 2654435761u;
+    hash ^= (unsigned int)((uintptr_t)cache >> 4);
+    return hash & (CACHE_LOOKUP_SIZE - 1);
+}
+
+static void cache_lookup_clear(Cache* cache)
 {
     for (int i = 0; i < CACHE_LOOKUP_SIZE; i++) {
-        s_cacheLookup[i] = -1;
-    }
-    for (int i = 0; i < cache->entriesLength; i++) {
-        int idx = cache->entries[i]->key & (CACHE_LOOKUP_SIZE - 1);
-        s_cacheLookup[idx] = i;
+        if (s_cacheLookup[i].cache == cache) {
+            s_cacheLookup[i].cache = NULL;
+            s_cacheLookup[i].key = 0;
+            s_cacheLookup[i].index = -1;
+        }
     }
 }
 
@@ -742,7 +785,6 @@ static bool cache_purge(Cache* cache)
         }
     }
 
-    cache_rebuild_lookup(cache);
     return true;
 }
 
