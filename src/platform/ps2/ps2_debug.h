@@ -42,6 +42,11 @@ void ps2_debug_printf(const char* fmt, ...) __attribute__((format(printf, 1, 2))
 /* Current log path, or "" when nothing is writable yet. */
 const char* ps2_debug_path(void);
 
+/* Called AFTER ps2_fs_init() + ps2_save_init() when mass: is guaranteed
+ * to be mounted. Redirects stdout/stderr to the chosen log file with
+ * unbuffered I/O so every printf reaches the pendrive before a freeze. */
+void ps2_init_debug_log(void);
+
 #define PS2_LOG(...) ps2_debug_printf(__VA_ARGS__)
 
 #ifdef __cplusplus

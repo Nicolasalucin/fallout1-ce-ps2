@@ -63,19 +63,23 @@ static void boot_log_fs_roots(void)
 int ps2_boot(const char* argv0)
 {
     ps2_time_init();
-    ps2_debug_init();
+    ps2_debug_init();      /* 1. Inicializa buffer early + sonda candidatas (solo TTY) */
     ps2_mem_init();
 
-    PS2_LOG("[ps2] boot: argv0='%s'", argv0 != NULL ? argv0 : "");
-    PS2_LOG("[ps2] boot: debug log='%s'", ps2_debug_path());
-
     ps2_input_init();
-    ps2_storage_init(argv0);
+    ps2_storage_init(argv0);   /* 2. USB up + active polling mass: (6.0 s) */
+
+    /* ============================================================
+     * AQUI: mass: YA EXISTE. Sondeo de assets y saves.
+     * ============================================================ */
     ps2_fs_init();
     ps2_save_init();
 
-    /* mass: only exists after the storage drivers ran, so the first lines
-     * above were buffered and are replayed here. */
+    /* ============================================================
+     * AHORA SI: redireccion segura. mass: esta montado -> no ENODEV.
+     * ============================================================ */
+    ps2_init_debug_log();
+
     ps2_debug_reprobe();
     PS2_LOG("[ps2] boot: debug log active='%s'", ps2_debug_path());
 

@@ -17,12 +17,17 @@
 #include "ps2_debug.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
+#include <kernel.h>
 #include <loadfile.h>
 #include <sifrpc.h>
+
+#include <delaythread.h>
 
 #define PS2_STORAGE_DIR_MAX 64
 
@@ -268,11 +273,57 @@ void ps2_storage_init(const char* argv0)
         storage_exec_irx("mx4sio_bd.irx", g_ps2_mx4sio_bd_irx, g_ps2_mx4sio_bd_irx_size);
     }
 
+    /* ================================================================
+     * ACTIVE POLLING LOOP PARA mass: / mass0: (PS2 Slim USB 1.1)
+     * Los drivers usbd.irx + usbhdfsd.irx en hardware real tardan
+     * 1.5–4 s en negociar el pendrive, leer MBR y registrar mass:.
+     * Si retornamos antes, el motor pide assets antes de que exista
+     * el mount point -> exit() limpio a boot.elf (pantalla negra).
+     * ================================================================ */
+    {
+        int tries;
+        int fd;
+        int mass_ready = 0;
+
+        printf("[ps2] storage: waiting for mass:/mass0: to settle (USB 1.1)...\n");
+        PS2_LOG("[ps2] storage: waiting for mass:/mass0: to settle (USB 1.1)...");
+
+        for (tries = 0; tries < 20; tries++) {          /* 20 x 300 ms = 6.0 s */
+            /* Probar mass: primero, luego mass0: (algunos loaders usan mass0:) */
+            fd = open("mass:/", O_RDONLY);
+            if (fd < 0) {
+                fd = open("mass0:/", O_RDONLY);
+            }
+            if (fd >= 0) {
+                close(fd);
+                mass_ready = 1;
+                break;
+            }
+            DelayThread(300000);    /* 300 ms */
+        }
+
+        if (mass_ready) {
+            printf("[ps2] storage: mass: ready after %d attempt(s)\n", tries + 1);
+            PS2_LOG("[ps2] storage: mass: ready after %d attempt(s)", tries + 1);
+        } else {
+            printf("[ps2] storage: WARNING mass:/mass0: did not settle in time (timeout)\n");
+            PS2_LOG("[ps2] storage: WARNING mass:/mass0: did not settle in time (timeout)");
+        }
+    }
+
+    /* Pausa de estabilizacion para MCMAN/MCSERV (heredada del bring-up MX4SIO) */
+    {
+        int i;
+        for (i = 0; i < 20; i++) {
+            DelayThread(500000);    /* 10 s total */
+        }
+    }
+
     if (storage_mass_present()) {
         printf("[ps2] storage: mass: ready\n");
         PS2_LOG("[ps2] storage: mass: ready");
     } else {
         printf("[ps2] storage: mass: not available\n");
-        PS2_LOG("[ps2] storage: mass: not available");
+        PS2_LOG("[ps2] storage: mass: not available (game data must be on mc0:/cdrom0:/hdd0:)");
     }
 }

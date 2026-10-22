@@ -12,10 +12,12 @@
 #include "ps2_time.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <kernel.h>
 #include <loadfile.h>
@@ -35,8 +37,10 @@ static int s_rpc_ready;
 static int s_mc_prepared;
 
 static const char* const s_candidates[] = {
-    "mass:/FALLOUT/debug.log",
-    "mc0:/FALLOUT/debug.log",
+    "mass:/FALLOUT/debug.log",   /* prioridad 1: estructura oficial */
+    "mass:/debug.log",           /* fallback: usuario copia ELF a raiz del pendrive */
+    "mc0:/FALLOUT/debug.log",    /* Memory Card */
+    "mc0:/debug.log",            /* fallback final */
 };
 static const int s_candidate_count = (int)(sizeof(s_candidates) / sizeof(s_candidates[0]));
 
@@ -188,6 +192,54 @@ void ps2_debug_reprobe(void)
 const char* ps2_debug_path(void)
 {
     return s_path;
+}
+
+/* Redirects stdout/stderr to the chosen debug log file with unbuffered I/O.
+ * This captures ALL printf output, not just PS2_LOG() lines. */
+static int debug_redirect_open(const char* path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        return 0;
+    }
+
+    if (fd != STDOUT_FILENO && dup2(fd, STDOUT_FILENO) < 0) {
+        close(fd);
+        return 0;
+    }
+    if (fd != STDERR_FILENO && dup2(fd, STDERR_FILENO) < 0) {
+        close(fd);
+        return 0;
+    }
+    if (fd != STDOUT_FILENO && fd != STDERR_FILENO) {
+        close(fd);
+    }
+
+    /* Critico: sin buffer. Cada printf llega al pendrive antes de congelarse. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    return 1;
+}
+
+void ps2_init_debug_log(void)
+{
+    if (s_path[0] != '\0') {
+        /* Ya redirigido (ps2_debug_reprobe() o llamado previo). */
+        if (!debug_redirect_open(s_path)) {
+            PS2_LOG("[ps2] init_debug_log: redirect failed for '%s'", s_path);
+        }
+        return;
+    }
+
+    /* Probe the candidates now that mass: is mounted. */
+    if (debug_probe()) {
+        debug_flush_early();
+        if (!debug_redirect_open(s_path)) {
+            PS2_LOG("[ps2] init_debug_log: redirect failed for '%s'", s_path);
+        }
+    } else {
+        PS2_LOG("[ps2] init_debug_log: no writable destination found");
+    }
 }
 
 void ps2_debug_printf(const char* fmt, ...)
