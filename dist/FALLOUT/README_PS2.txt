@@ -1,5 +1,5 @@
 ==============================================================================
- FALLOUT for PlayStation 2 - Community Edition      v1.0.1
+ FALLOUT for PlayStation 2 - Community Edition      v1.0.2
  Unofficial, non-commercial native engine port. Bring your own game data.
 ==============================================================================
 
@@ -17,19 +17,33 @@ content must come from YOUR own legitimate copy of Fallout 1 (Steam, GOG or
 the original CD). If you do not own the game, please buy it.
 
 ------------------------------------------------------------------------------
- WHAT'S NEW IN v1.0.1
+ WHAT'S NEW IN v1.0.2
 ------------------------------------------------------------------------------
-- Hardware-stable boot: clean IOP reset with automatic host:/PCSX2 bypass,
-  plus an optional NO_IOP_RESET marker for loaders that already own the IOP.
+- Storage bring-up now checks host: first, then actively polls mass:, mass0:
+  and mass1: in sequence (stopping at the first ready device) before probing
+  mc0:. Device probes use stat()/open() and never opendir() on a missing
+  device.
+- Crash-resistant boot log: mass0: fallbacks, a 4 MB cap, and a periodic
+  dup2() close/reopen commit so the FAT32 directory entry is durable.
+  stdout/stderr are never left on closed descriptors.
+- The VFS resolves filenames case-insensitively: MASTER.DAT, master.dat and
+  Master.Dat all work on every supported device.
+- GS VRAM allocation is validated with GSKIT_ALLOC_ERROR; the art/sound cache
+  uses a per-instance O(1) lookup hint with full validation.
+- Validation: the full hyper-strict PCSX2 suite (fastmem off) is green. This
+  bundle includes the physical-console boot hardening; validation on real
+  hardware is still pending.
+
+v1.0.1 baseline:
+- Clean IOP reset with automatic host:/PCSX2 bypass, plus an optional
+  NO_IOP_RESET marker for loaders that already own the IOP.
 - 1 MB main stack, divide-by-zero traps disabled, R5900 exception handlers and
   a fatal-error screen with a crash log.
-- USB/MX4SIO/BDM probing for mass:, mass0:, mass1:, mass2: and mass3: without
-  opendir() on missing devices; case-insensitive MASTER.DAT/CRITTER.DAT.
-- GS/VRAM validation, PAL/NTSC auto-detection and optional PS2VIDEO.CFG
-  (mode=PAL or mode=NTSC).
-- Local ps2sdk SIF RPC hardening fixed for fileio reads: fioRead() now receives
-  its _fio_read_intr completion, so fallout.cfg loads reliably on strict PCSX2
-  and on real hardware.
+- Embedded USB + BDM IOP drivers with MX4SIO support and case-insensitive
+  MASTER.DAT/CRITTER.DAT resolution.
+- GS/VRAM validation, PAL/NTSC auto-detection and optional PS2VIDEO.CFG.
+- Local ps2sdk SIF RPC hardening: fioRead() receives its _fio_read_intr
+  completion, so fallout.cfg loads reliably on strict PCSX2 and real hardware.
 - Full hyper-strict PCSX2 smoke suite green (frontend, save/load, world tour,
   dialogue, combat and pad hotkeys).
 
@@ -50,6 +64,9 @@ OPL / uLaunchELF:
   mass:/FALLOUT/MASTER.DAT
   mass:/FALLOUT/CRITTER.DAT
   mass:/FALLOUT/data/...        optional, see below
+
+Filenames are matched case-insensitively: MASTER.DAT, master.dat and
+Master.Dat all resolve to the same file.
 
 Optional but recommended: copy the data/ folder (music, movies, sounds)
 from your Fallout installation into the same folder. The engine reads loose

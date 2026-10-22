@@ -68,7 +68,14 @@ legal copy of Fallout to use this software (see
 
 ## Status
 
-**v1.0.1** — stable hardware-hardening release. All planned phases (F0–F9) have landed and the full strict smoke suite is green on PCSX2 (frontend, save/load with the on-screen keyboard, world tour, dialogue, combat, pad hotkeys):
+**v1.0.2** — hardware boot hardening. Full hyper-strict PCSX2 suite green (frontend, save/load with the on-screen keyboard, world tour, dialogue, combat, pad hotkeys). This build targets physical-console boot reliability; hardware validation is still in progress.
+
+- [x] Storage bring-up checks `host:` first, then actively polls `mass:`, `mass0:` and `mass1:` sequentially (stopping at the first ready device) before probing `mc0:` — no `opendir()` on missing devices.
+- [x] Crash-resistant boot log with `mass0:` fallbacks, a 4 MB cap, and a periodic `dup2()` close/reopen commit so the FAT32 directory entry is durable. stdout/stderr are never left on closed descriptors.
+- [x] VFS resolves filenames case-insensitively: `MASTER.DAT`, `master.dat` and `Master.Dat` all work on every supported device.
+- [x] GS VRAM allocation is validated with `GSKIT_ALLOC_ERROR`; the art/sound cache uses a per-instance O(1) lookup hint with full validation.
+
+**v1.0.1** — stable hardware-hardening release. All planned phases (F0–F9) have landed and the full strict smoke suite is green on PCSX2:
 
 - [x] Clean IOP reset with automatic `host:`/PCSX2 bypass and an optional `NO_IOP_RESET` marker.
 - [x] 1 MB main stack, `-mno-check-zero-division`, R5900 exception vectors, fatal screen and crash log.
@@ -129,6 +136,8 @@ mass:/FALLOUT/saves/...       (fallback save location)
 ```
 
 The USB stick must be FAT32. MX4SIO exposes the SD card as `mass:` as well.
+Filenames are matched case-insensitively, so `MASTER.DAT`, `master.dat` and
+`Master.Dat` all resolve to the same file.
 
 The game locates `MASTER.DAT`/`CRITTER.DAT` automatically: first next to the
 ELF (the directory it was launched from), then `mass:`, `mass0:`, `cdrom0:`,
@@ -292,7 +301,14 @@ para usar este software (ver [Cómo usar tus propios datos legales]).
 
 ## Estado
 
-**v1.0.1** — release estable con blindaje de hardware. Todas las fases previstas (F0–F9) están completadas y la suite estricta completa da verde en PCSX2 (frontend, guardado/carga con teclado en pantalla, world tour, diálogos, combate, atajos del pad):
+**v1.0.2** — blindaje de arranque en hardware. Suite completa hyper-strict de PCSX2 en verde (frontend, guardado/carga con teclado en pantalla, world tour, diálogos, combate, atajos del pad). Este build apunta a la fiabilidad de arranque en consola física; la validación en hardware sigue en curso.
+
+- [x] El bring-up de almacenamiento comprueba primero `host:`, luego sondea activamente `mass:`, `mass0:` y `mass1:` en secuencia (parando en el primer dispositivo listo) antes de probar `mc0:` — sin `opendir()` en dispositivos ausentes.
+- [x] Log de arranque resistente a crashes con fallbacks `mass0:`, tope de 4 MB y commit periódico mediante `dup2()` close/reopen para que la entrada FAT32 sea durable. stdout/stderr nunca quedan sobre descriptores cerrados.
+- [x] El VFS resuelve nombres sin distinguir mayúsculas: `MASTER.DAT`, `master.dat` y `Master.Dat` funcionan en todos los dispositivos soportados.
+- [x] La asignación de VRAM GS se valida con `GSKIT_ALLOC_ERROR`; la caché de arte/sonido usa una pista O(1) por instancia con validación completa.
+
+**v1.0.1** — release estable con blindaje de hardware. Todas las fases previstas (F0–F9) están completadas y la suite estricta completa da verde en PCSX2:
 
 - [x] Reset limpio del IOP con bypass automático en `host:`/PCSX2 y marcador opcional `NO_IOP_RESET`.
 - [x] Pila principal de 1 MB, `-mno-check-zero-division`, vectores de excepción R5900, pantalla fatal y log de crash.
@@ -350,6 +366,8 @@ mass:/FALLOUT/saves/...       (guardado alternativo)
 ```
 
 El pendrive debe estar en FAT32. MX4SIO expone la SD como `mass:` también.
+Los nombres se comparan sin distinguir mayúsculas: `MASTER.DAT`, `master.dat`
+y `Master.Dat` resuelven al mismo fichero.
 
 El juego localiza `MASTER.DAT`/`CRITTER.DAT` automáticamente: primero junto al
 ELF (la carpeta desde la que se lanzó), luego `mass:`, `mass0:`, `cdrom0:`,
