@@ -16,6 +16,10 @@ endif()
 
 project(${EXECUTABLE_NAME})
 
+# The EE exception vector is a .S file; the ASM language is not enabled by
+# the default project() invocation.
+enable_language(ASM)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
@@ -310,6 +314,10 @@ if(PS2)
         "src/platform/ps2/ps2_debug.c"
         "src/platform/ps2/ps2_time.c"
         "src/platform/ps2/ps2_mem.c"
+        "src/platform/ps2/ps2_iop.c"
+        "src/platform/ps2/ps2_exception.c"
+        "src/platform/ps2/ps2_exception_asm.S"
+        "src/platform/ps2/ps2_exit.c"
         "src/platform/ps2/input_pad.c"
         "src/platform/ps2/video_gs.c"
         "src/platform/ps2/ps2_osk.c"
@@ -349,7 +357,13 @@ if(PS2)
     # game data from mass: without shipping loose .irx files. The tiered
     # loading in ps2_storage.c only touches them when the device is not
     # already provided by the loader (OPL/uLaunchELF/ps2link/PCSX2).
-    set(_ps2_storage_irx_modules usbd usbhdfsd bdm usbmass_bd bdmfs_fatfs sio2man mx4sio_bd)
+    # Base I/O and pad/memory-card modules are reloaded after the IOP reset.
+    # ioman/fileio are embedded so a clean reset does not depend on whatever
+    # the loader happened to leave resident.
+    set(_ps2_storage_irx_modules
+        usbd usbhdfsd bdm usbmass_bd bdmfs_fatfs sio2man mx4sio_bd
+        ioman iomanX fileio mcman mcserv padman
+    )
     set(_ps2_storage_irx_sources "")
     foreach(_ps2_irx ${_ps2_storage_irx_modules})
         file(READ "${PS2SDK}/iop/irx/${_ps2_irx}.irx" _ps2_irx_hex HEX)
@@ -403,6 +417,9 @@ if(PS2)
         src/platform/ps2/ps2_debug.c
         src/platform/ps2/ps2_time.c
         src/platform/ps2/ps2_mem.c
+        src/platform/ps2/ps2_iop.c
+        src/platform/ps2/ps2_exception.c
+        src/platform/ps2/ps2_exit.c
         src/platform/ps2/input_pad.c
         src/platform/ps2/video_gs.c
         src/platform/ps2/ps2_osk.c
@@ -415,10 +432,18 @@ if(PS2)
 
     # Platform libraries: gsKit (+ DMA/kit utilities), GS graph primitives,
     # libpad for DualShock 2 input, libaudsrv for SPU2 streaming.
+    # debug (libdebug.a) provides init_scr()/scr_printf(); it is linked before
+    # graph because its screen code references GsPutIMR/SetGsCrt.
+    # NOTE: -ldebug / -lgraph are spelled as flags on purpose. In
+    # target_link_libraries(), the bare word "debug" is the multi-config
+    # keyword, so "debug graph" would link graph only in Debug builds and
+    # drop libdebug entirely.
     target_link_libraries(${EXECUTABLE_NAME}
         gskit
         dmakit
-        graph
+        patches
+        -ldebug
+        -lgraph
         pad
         audsrv
         m

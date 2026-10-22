@@ -42,6 +42,15 @@ void ps2_debug_printf(const char* fmt, ...) __attribute__((format(printf, 1, 2))
 /* Current log path, or "" when nothing is writable yet. */
 const char* ps2_debug_path(void);
 
+/* Sets the crash flag: subsequent ps2_debug_printf() calls become no-ops so
+ * an exception report cannot recurse into file I/O. Call after the crash
+ * screen has been drawn. */
+void ps2_debug_enter_crash_mode(void);
+
+/* Best-effort fflush(NULL) guarded against re-entry. Used before a clean
+ * loader handoff; may block if the I/O stack is wedged. */
+void ps2_debug_flush_all(void);
+
 /* Called AFTER ps2_fs_init() + ps2_save_init() when mass: is guaranteed
  * to be mounted. Redirects stdout/stderr to the chosen log file with
  * unbuffered I/O so every printf reaches the pendrive before a freeze. */

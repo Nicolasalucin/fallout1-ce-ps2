@@ -24,9 +24,26 @@
 extern "C" {
 #endif
 
+/* Snapshot of the boot devices for the fatal "no game data" screen. */
+typedef struct ps2_storage_status {
+    int mass;
+    int mass0;
+    int mass1;
+    int mc0;
+    int host;
+} ps2_storage_status_t;
+
 /* `argv0` may be NULL or empty; safe to call once at boot, before
  * ps2_fs_init(). */
 void ps2_storage_init(const char* argv0);
+
+/* Non-blocking existence probe (stat() first, open() as the fallback).
+ * Unlike the old opendir() helper this also works for plain files, which is
+ * what the IOP-reset marker and the device checks need. */
+int ps2_storage_device_present(const char* path);
+
+/* Fills `out` with the presence of mass:/mass0:/mass1:/mc0:/host:. */
+void ps2_storage_get_status(ps2_storage_status_t* out);
 
 /* Normalized directory of the running ELF with a trailing slash
  * ("mass:/FALLOUT/", "host:/", "cdrom0:/"), or NULL when argv[0] carries no

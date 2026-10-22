@@ -15,12 +15,13 @@
 
 #include "ps2_storage.h"
 #include "ps2_debug.h"
+#include "ps2_exception.h"
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <kernel.h>
@@ -55,6 +56,18 @@ extern const unsigned char g_ps2_sio2man_irx[];
 extern const unsigned int g_ps2_sio2man_irx_size;
 extern const unsigned char g_ps2_mx4sio_bd_irx[];
 extern const unsigned int g_ps2_mx4sio_bd_irx_size;
+extern const unsigned char g_ps2_ioman_irx[];
+extern const unsigned int g_ps2_ioman_irx_size;
+extern const unsigned char g_ps2_iomanX_irx[];
+extern const unsigned int g_ps2_iomanX_irx_size;
+extern const unsigned char g_ps2_fileio_irx[];
+extern const unsigned int g_ps2_fileio_irx_size;
+extern const unsigned char g_ps2_mcman_irx[];
+extern const unsigned int g_ps2_mcman_irx_size;
+extern const unsigned char g_ps2_mcserv_irx[];
+extern const unsigned int g_ps2_mcserv_irx_size;
+extern const unsigned char g_ps2_padman_irx[];
+extern const unsigned int g_ps2_padman_irx_size;
 
 /* Embedded by CMake as well; declared here for the boot alignment audit. */
 extern const unsigned char g_audsrv_irx[];
@@ -135,21 +148,41 @@ const char* ps2_storage_elf_dir(void)
 
 /* --------------------------------------------------------- IOP modules --- */
 
-static int storage_device_present(const char* dir)
+int ps2_storage_device_present(const char* path)
 {
     char tmp[PS2_STORAGE_DIR_MAX + 2];
-    DIR* d;
+    struct stat st;
+    int fd;
 
-    d = opendir(dir);
-    if (d != NULL) {
-        closedir(d);
+    tmp[0] = '\0';
+
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+
+    /* stat() is the cheap path and works for files and directories on
+     * FAT32, PFS, ISO9660 and PCSX2 hostfs. Some IOP drivers only answer
+     * fioOpen() for a directory root, so retry both spellings with
+     * open() before declaring the device absent. */
+    if (stat(path, &st) == 0) {
         return 1;
     }
 
-    if (snprintf(tmp, sizeof(tmp), "%s/", dir) < (int)sizeof(tmp)) {
-        d = opendir(tmp);
-        if (d != NULL) {
-            closedir(d);
+    if (snprintf(tmp, sizeof(tmp), "%s/", path) < (int)sizeof(tmp)
+        && stat(tmp, &st) == 0) {
+        return 1;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        close(fd);
+        return 1;
+    }
+
+    if (tmp[0] != '\0') {
+        fd = open(tmp, O_RDONLY);
+        if (fd >= 0) {
+            close(fd);
             return 1;
         }
     }
@@ -159,7 +192,22 @@ static int storage_device_present(const char* dir)
 
 static int storage_mass_present(void)
 {
-    return storage_device_present("mass:") || storage_device_present("mass0:");
+    return ps2_storage_device_present("mass:")
+        || ps2_storage_device_present("mass0:")
+        || ps2_storage_device_present("mass1:");
+}
+
+void ps2_storage_get_status(ps2_storage_status_t* out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    out->mass = ps2_storage_device_present("mass:");
+    out->mass0 = ps2_storage_device_present("mass0:");
+    out->mass1 = ps2_storage_device_present("mass1:");
+    out->mc0 = ps2_storage_device_present("mc0:");
+    out->host = ps2_storage_device_present("host:");
 }
 
 static int storage_exec_irx(const char* name, const unsigned char* data, unsigned int size)
@@ -226,6 +274,12 @@ void ps2_irx_alignment_report(void)
     storage_report_irx("bdmfs_fatfs.irx", g_ps2_bdmfs_fatfs_irx, g_ps2_bdmfs_fatfs_irx_size);
     storage_report_irx("sio2man.irx", g_ps2_sio2man_irx, g_ps2_sio2man_irx_size);
     storage_report_irx("mx4sio_bd.irx", g_ps2_mx4sio_bd_irx, g_ps2_mx4sio_bd_irx_size);
+    storage_report_irx("ioman.irx", g_ps2_ioman_irx, g_ps2_ioman_irx_size);
+    storage_report_irx("iomanX.irx", g_ps2_iomanX_irx, g_ps2_iomanX_irx_size);
+    storage_report_irx("fileio.irx", g_ps2_fileio_irx, g_ps2_fileio_irx_size);
+    storage_report_irx("mcman.irx", g_ps2_mcman_irx, g_ps2_mcman_irx_size);
+    storage_report_irx("mcserv.irx", g_ps2_mcserv_irx, g_ps2_mcserv_irx_size);
+    storage_report_irx("padman.irx", g_ps2_padman_irx, g_ps2_padman_irx_size);
 }
 
 void ps2_storage_init(const char* argv0)
@@ -247,7 +301,7 @@ void ps2_storage_init(const char* argv0)
         PS2_LOG("[ps2] storage: mass: already available (loader-managed)");
         return;
     }
-    if (storage_device_present("host:")) {
+    if (ps2_storage_device_present("host:")) {
         printf("[ps2] storage: host: available (development I/O), skipping USB bring-up\n");
         PS2_LOG("[ps2] storage: host: available (development I/O), skipping USB bring-up");
         return;
@@ -274,48 +328,41 @@ void ps2_storage_init(const char* argv0)
     }
 
     /* ================================================================
-     * ACTIVE POLLING LOOP PARA mass: / mass0: (PS2 Slim USB 1.1)
-     * Los drivers usbd.irx + usbhdfsd.irx en hardware real tardan
-     * 1.5–4 s en negociar el pendrive, leer MBR y registrar mass:.
-     * Si retornamos antes, el motor pide assets antes de que exista
-     * el mount point -> exit() limpio a boot.elf (pantalla negra).
+     * Active polling loop for mass: / mass0: / mass1: (USB 1.1).
+     * usbd + usbhdfsd need 1.5-4 s on real hardware to negotiate the
+     * stick, read the MBR and register the mount point. Returning earlier
+     * makes the engine request assets before the device exists.
      * ================================================================ */
     {
+        static const char* const mounts[] = { "mass:", "mass0:", "mass1:" };
+        const char* ready = NULL;
         int tries;
-        int fd;
-        int mass_ready = 0;
 
-        printf("[ps2] storage: waiting for mass:/mass0: to settle (USB 1.1)...\n");
-        PS2_LOG("[ps2] storage: waiting for mass:/mass0: to settle (USB 1.1)...");
+        printf("[ps2] storage: waiting for mass:/mass0:/mass1: to settle (USB 1.1)...\n");
+        PS2_LOG("[ps2] storage: waiting for mass:/mass0:/mass1: to settle (USB 1.1)...");
 
-        for (tries = 0; tries < 20; tries++) {          /* 20 x 300 ms = 6.0 s */
-            /* Probar mass: primero, luego mass0: (algunos loaders usan mass0:) */
-            fd = open("mass:/", O_RDONLY);
-            if (fd < 0) {
-                fd = open("mass0:/", O_RDONLY);
+        for (tries = 0; tries < 20 && ready == NULL; tries++) { /* 20 x 300 ms = 6.0 s */
+            int m;
+
+            for (m = 0; m < (int)(sizeof(mounts) / sizeof(mounts[0])); m++) {
+                if (ps2_storage_device_present(mounts[m])) {
+                    ready = mounts[m];
+                    break;
+                }
             }
-            if (fd >= 0) {
-                close(fd);
-                mass_ready = 1;
-                break;
+
+            if (ready == NULL) {
+                ps2_exception_step("storage-poll", (unsigned)tries);
+                DelayThread(300000); /* 300 ms */
             }
-            DelayThread(300000);    /* 300 ms */
         }
 
-        if (mass_ready) {
-            printf("[ps2] storage: mass: ready after %d attempt(s)\n", tries + 1);
-            PS2_LOG("[ps2] storage: mass: ready after %d attempt(s)", tries + 1);
+        if (ready != NULL) {
+            printf("[ps2] storage: %s ready after %d attempt(s)\n", ready, tries + 1);
+            PS2_LOG("[ps2] storage: %s ready after %d attempt(s)", ready, tries + 1);
         } else {
-            printf("[ps2] storage: WARNING mass:/mass0: did not settle in time (timeout)\n");
-            PS2_LOG("[ps2] storage: WARNING mass:/mass0: did not settle in time (timeout)");
-        }
-    }
-
-    /* Pausa de estabilizacion para MCMAN/MCSERV (heredada del bring-up MX4SIO) */
-    {
-        int i;
-        for (i = 0; i < 20; i++) {
-            DelayThread(500000);    /* 10 s total */
+            printf("[ps2] storage: WARNING mass:/mass0:/mass1: did not settle in time (timeout)\n");
+            PS2_LOG("[ps2] storage: WARNING mass:/mass0:/mass1: did not settle in time (timeout)");
         }
     }
 

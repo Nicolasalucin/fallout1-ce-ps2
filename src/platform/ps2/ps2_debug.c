@@ -9,9 +9,9 @@
  */
 
 #include "ps2_debug.h"
+#include "ps2_storage.h"
 #include "ps2_time.h"
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -27,14 +27,26 @@
 
 /* Lines emitted before the USB stack is up (ps2_debug_init() runs first in
  * ps2_boot()) are kept here and replayed once a destination opens. */
-#define PS2_DEBUG_EARLY_SIZE 8192
+#define PS2_DEBUG_EARLY_SIZE 16384
 static char s_early[PS2_DEBUG_EARLY_SIZE];
 static int s_early_len;
+
+/* A boot log that fills the stick is worse than no log: once the cap is hit
+ * the file path is closed for the rest of the boot, but the console mirror
+ * keeps working. */
+#define PS2_DEBUG_LOG_MAX_BYTES (4 * 1024 * 1024)
 
 static char s_path[PS2_DEBUG_PATH_MAX];
 static int s_probed;
 static int s_rpc_ready;
 static int s_mc_prepared;
+static int s_truncated;
+static unsigned int s_log_bytes;
+
+/* Re-entrancy/crash guards: a failing IOP can make stdio call back into the
+ * log path, and the exception reporter must never try to open a file. */
+static volatile int s_in_log;
+static volatile int s_crash_mode;
 
 static const char* const s_candidates[] = {
     "mass:/FALLOUT/debug.log",   /* prioridad 1: estructura oficial */
@@ -59,29 +71,31 @@ static int debug_file_writable(const char* path)
  * drivers themselves (uLaunchELF/OPL usually leave MCMAN/MCSERV resident). */
 static void debug_prepare_mc0(void)
 {
-    DIR* dir;
-
     if (s_mc_prepared) {
         return;
     }
     s_mc_prepared = 1;
 
-    dir = opendir("mc0:");
-    if (dir == NULL) {
+    if (!ps2_storage_device_present("mc0:")) {
+        SifLoadModule("rom0:SIO2MAN", 0, NULL);
         SifLoadModule("rom0:MCMAN", 0, NULL);
         SifLoadModule("rom0:MCSERV", 0, NULL);
-        dir = opendir("mc0:");
     }
 
-    if (dir != NULL) {
-        closedir(dir);
+    if (ps2_storage_device_present("mc0:")) {
+        mkdir("mc0:/FALLOUT", 0755);
     }
-
-    mkdir("mc0:/FALLOUT", 0755);
 }
 
 static int debug_probe(void)
 {
+#ifdef PS2_DEV_SMOKE_TEST
+    /* Smoke runs are captured from the PCSX2 console. Avoid touching mc0:
+     * from the harness: the folder-backed card and hostfs reads do not get
+     * along in PCSX2, and an automated run does not need the file copy. */
+    return 0;
+#endif
+
     int i;
 
     if (!s_rpc_ready) {
@@ -92,7 +106,7 @@ static int debug_probe(void)
     s_path[0] = '\0';
 
     for (i = 0; i < s_candidate_count; i++) {
-        if (i == 1) {
+        if (i == 2) {
             debug_prepare_mc0();
         }
 
@@ -106,22 +120,49 @@ static int debug_probe(void)
     return 0;
 }
 
-static int debug_write_line(uint32_t ms, const char* msg)
+static void debug_truncate(void)
 {
     FILE* f;
 
     if (s_path[0] == '\0') {
+        return;
+    }
+
+    f = fopen(s_path, "w");
+    if (f != NULL) {
+        fclose(f);
+    }
+    s_log_bytes = 0;
+}
+
+static int debug_write_line(uint32_t ms, const char* msg)
+{
+    FILE* f;
+    int n;
+
+    if (s_path[0] == '\0' || s_crash_mode || s_in_log) {
         return 0;
     }
 
+    if (s_log_bytes >= PS2_DEBUG_LOG_MAX_BYTES) {
+        return 0;
+    }
+
+    s_in_log = 1;
     f = fopen(s_path, "a");
     if (f == NULL) {
+        s_in_log = 0;
         return 0;
     }
 
-    fprintf(f, "[ps2dbg] %8u ms | %s\n", (unsigned int)ms, msg);
+    n = fprintf(f, "[ps2dbg] %8u ms | %s\n", (unsigned int)ms, msg);
     fflush(f);
     fclose(f);
+    if (n > 0) {
+        s_log_bytes += (unsigned int)n;
+    }
+    s_in_log = 0;
+
     return 1;
 }
 
@@ -129,19 +170,26 @@ static void debug_flush_early(void)
 {
     FILE* f;
 
-    if (s_early_len == 0 || s_path[0] == '\0') {
+    if (s_early_len == 0 || s_path[0] == '\0'
+        || s_crash_mode || s_in_log) {
         return;
     }
 
+    if (s_log_bytes >= PS2_DEBUG_LOG_MAX_BYTES) {
+        s_early_len = 0;
+        return;
+    }
+
+    s_in_log = 1;
     f = fopen(s_path, "a");
-    if (f == NULL) {
-        return;
+    if (f != NULL) {
+        fwrite(s_early, 1, (size_t)s_early_len, f);
+        fflush(f);
+        fclose(f);
+        s_log_bytes += (unsigned int)s_early_len;
+        s_early_len = 0;
     }
-
-    fwrite(s_early, 1, (size_t)s_early_len, f);
-    fflush(f);
-    fclose(f);
-    s_early_len = 0;
+    s_in_log = 0;
 }
 
 static void debug_buffer(uint32_t ms, const char* msg)
@@ -167,6 +215,10 @@ void ps2_debug_init(void)
     s_probed = 1;
 
     if (debug_probe()) {
+        if (!s_truncated) {
+            debug_truncate();
+            s_truncated = 1;
+        }
         debug_flush_early();
     }
 }
@@ -223,23 +275,42 @@ static int debug_redirect_open(const char* path)
 
 void ps2_init_debug_log(void)
 {
-    if (s_path[0] != '\0') {
-        /* Ya redirigido (ps2_debug_reprobe() o llamado previo). */
-        if (!debug_redirect_open(s_path)) {
-            PS2_LOG("[ps2] init_debug_log: redirect failed for '%s'", s_path);
+    if (s_path[0] == '\0') {
+        /* Probe the candidates now that mass: is mounted. */
+        if (!debug_probe()) {
+            PS2_LOG("[ps2] init_debug_log: no writable destination found");
+            return;
         }
+
+        if (!s_truncated) {
+            debug_truncate();
+            s_truncated = 1;
+        }
+        debug_flush_early();
+    }
+
+#ifdef PS2_DEV_SMOKE_TEST
+    /* The smoke runner reads its SUITE_FINISHED verdict from the PCSX2
+     * console. Redirecting stdout to a memory-card file would hide it (and
+     * MCSERV does not like a long-lived descriptor plus one open per log
+     * line). PS2_LOG() still appends to debug.log. */
+    PS2_LOG("[ps2] init_debug_log: smoke build keeps stdout on the console");
+    return;
+#else
+    /* A long-lived stdout descriptor on a memory card conflicts with the
+     * open/append/close-per-line logger: MCSERV rejects the second open and
+     * the re-probe path would churn the card. Only redirect on USB mass
+     * storage, where concurrent opens are safe; on mc0: the per-line logger
+     * already keeps the crash-resistant copy. */
+    if (strncmp(s_path, "mass:", 5) != 0) {
+        PS2_LOG("[ps2] init_debug_log: keeping stdout on the console for '%s'", s_path);
         return;
     }
 
-    /* Probe the candidates now that mass: is mounted. */
-    if (debug_probe()) {
-        debug_flush_early();
-        if (!debug_redirect_open(s_path)) {
-            PS2_LOG("[ps2] init_debug_log: redirect failed for '%s'", s_path);
-        }
-    } else {
-        PS2_LOG("[ps2] init_debug_log: no writable destination found");
+    if (!debug_redirect_open(s_path)) {
+        PS2_LOG("[ps2] init_debug_log: redirect failed for '%s'", s_path);
     }
+#endif
 }
 
 void ps2_debug_printf(const char* fmt, ...)
@@ -248,7 +319,7 @@ void ps2_debug_printf(const char* fmt, ...)
     uint32_t ms;
     va_list ap;
 
-    if (fmt == NULL) {
+    if (fmt == NULL || s_crash_mode || s_in_log) {
         return;
     }
 
@@ -264,14 +335,18 @@ void ps2_debug_printf(const char* fmt, ...)
 
     if (s_path[0] == '\0') {
         /* Boot-time lines (before the USB stack exists) are replayed by
-         * ps2_debug_reprobe() once ps2_storage_init() has run. Do not probe
-         * on every line: loading MCMAN/MCSERV repeatedly during storage
-         * bring-up would be pointless and slow. */
+         * ps2_storage_init()/ps2_debug_reprobe() once a destination opens.
+         * Do not probe on every line: loading MCMAN/MCSERV repeatedly during
+         * storage bring-up would be pointless and slow. */
         debug_buffer(ms, msg);
         return;
     }
 
     if (!debug_write_line(ms, msg)) {
+        if (s_log_bytes >= PS2_DEBUG_LOG_MAX_BYTES) {
+            return;
+        }
+
         /* USB stick pulled, card removed, host: gone: re-probe and retry. */
         if (debug_probe()) {
             debug_flush_early();
@@ -280,4 +355,25 @@ void ps2_debug_printf(const char* fmt, ...)
             debug_buffer(ms, msg);
         }
     }
+}
+
+void ps2_debug_enter_crash_mode(void)
+{
+    if (s_crash_mode) {
+        return;
+    }
+
+    ps2_debug_flush_all();
+    s_crash_mode = 1;
+}
+
+void ps2_debug_flush_all(void)
+{
+    if (s_in_log) {
+        return;
+    }
+
+    s_in_log = 1;
+    fflush(NULL);
+    s_in_log = 0;
 }

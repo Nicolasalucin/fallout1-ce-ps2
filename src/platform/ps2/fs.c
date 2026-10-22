@@ -7,6 +7,8 @@
 
 #include "ps2_fs.h"
 #include "ps2_debug.h"
+#include "ps2_exception.h"
+#include "ps2_exit.h"
 
 #include "ps2_save.h"
 #include "ps2_storage.h"
@@ -21,7 +23,7 @@
 
 #include <delaythread.h>
 
-#define PS2_FS_MAX_ROOTS 12
+#define PS2_FS_MAX_ROOTS 20
 #define PS2_FS_ROOT_MAX 40
 #define PS2_FS_PATH_MAX 256
 #define PS2_FS_DAT_BUFSIZE (64 * 1024)
@@ -32,6 +34,13 @@ static const char* const s_candidates[] = {
     "mass:/FALLOUT/",        /* USB stick / MX4SIO in a FALLOUT folder */
     "mass:/",                /* USB stick with the data at the root */
     "mass0:/FALLOUT/",       /* numbered mass device */
+    "mass0:/",
+    "mass1:/FALLOUT/",       /* second USB/BDM device */
+    "mass1:/",
+    "mass2:/FALLOUT/",       /* additional BDM mounts */
+    "mass2:/",
+    "mass3:/FALLOUT/",
+    "mass3:/",
     "cdrom0:/",              /* CD/DVD root */
     "cdrom0:/FALLOUT/",      /* CD/DVD with the data in a FALLOUT folder */
     "hdd0:/FALLOUT/",        /* internal HDD (PFS partition) */
@@ -277,7 +286,7 @@ static fs_dir_cache_slot_t* fs_dir_cache_lookup(const char* dir)
     for (i = 0; i < PS2_FS_DIR_CACHE_SLOTS; i++) {
         fs_dir_cache_slot_t* slot = &s_dir_cache[i];
 
-        if (!slot->valid || strcmp(slot->path, dir) != 0) {
+        if (!slot->valid || !fs_path_same(slot->path, dir)) {
             continue;
         }
 
@@ -512,6 +521,8 @@ static void fs_validate_root(const char* root)
         return;
     }
 
+    ps2_exception_step("fs-root", (unsigned)s_root_count);
+
     for (i = 0; i < (int)(sizeof(probes) / sizeof(probes[0])); i++) {
         int fd;
 
@@ -519,9 +530,18 @@ static void fs_validate_root(const char* root)
             return;
         }
 
+        /* Resolve the root and the datafile case-insensitively. This accepts
+         * MASTER.DAT, master.dat and Master.dat, and also a root spelled
+         * "fallout" instead of "FALLOUT". The old literal open() only worked
+         * when the medium happened to use the exact shipped spelling. */
+        if (ps2_fs_canonicalize(probe, 0) != 0) {
+            printf("[ps2] fs: '%s' not available (%s, unresolved)\n", root, probes[i]);
+            return;
+        }
+
         fd = open(probe, O_RDONLY);
         if (fd < 0) {
-            printf("[ps2] fs: '%s' not available (%s)\n", root, probes[i]);
+            printf("[ps2] fs: '%s' not available (%s, open failed)\n", root, probes[i]);
             return;
         }
         close(fd);
@@ -568,29 +588,26 @@ void ps2_fs_init(void)
 
     printf("[ps2] fs: FATAL no game data root found\n");
     PS2_LOG("[ps2] fs: FATAL no game data root found");
-    fflush(stdout);
-    fflush(stderr);
-    DelayThread(3000000);  /* 3 s pause so the user can read the message */
 
-    /* Temporary F4 diagnostics: what does the PCSX2 host: root expose? */
     {
-        DIR* d = opendir("host:");
-        if (d == NULL) {
-            d = opendir("host:/");
-        }
-        if (d == NULL) {
-            printf("[ps2] fs: diag: opendir(host:) failed\n");
-        } else {
-            struct dirent* e;
-            int n = 0;
-            printf("[ps2] fs: diag: host: contains:");
-            while ((e = readdir(d)) != NULL && n < 12) {
-                printf(" [%s]", e->d_name);
-                n++;
-            }
-            printf("\n");
-            closedir(d);
-        }
+        ps2_storage_status_t status;
+        char devices[128];
+
+        ps2_storage_get_status(&status);
+        snprintf(devices, sizeof(devices),
+            "mass:%s mass0:%s mass1:%s mc0:%s host:%s",
+            status.mass ? "yes" : "no",
+            status.mass0 ? "yes" : "no",
+            status.mass1 ? "yes" : "no",
+            status.mc0 ? "yes" : "no",
+            status.host ? "yes" : "no");
+        PS2_LOG("[ps2] fs: devices: %s", devices);
+
+        ps2_fatal_show("GAME DATA NOT FOUND",
+            "MASTER.DAT and CRITTER.DAT are required.",
+            devices,
+            "Check the FAT32 MBR and USB port 1.",
+            8000);
     }
 }
 
@@ -696,9 +713,10 @@ int ps2_fs_canonicalize(char* path, int allow_missing_last)
          * ISO9660, host, PFS), so a blind uppercase open() could only add a
          * failed open for genuinely missing files -- and on PCSX2 a failing
          * open() corrupts the host filesystem HLE (SIF RPC state, the VM
-         * crashes ~100 ms later). Bisection confirmed it (F9). The literal
-         * uppercase probes in fs_validate_root() (MASTER.DAT / CRITTER.DAT)
-         * cover the "try ALL CAPS" rule where it is safe and useful. */
+         * crashes ~100 ms later). Bisection confirmed it (F9).
+         * fs_validate_root() uses this same canonicalizer for its
+         * MASTER.DAT/CRITTER.DAT probes, so a lowercase medium is accepted
+         * without a second, failing open. */
         if (!found) {
             if (!(last && allow_missing_last)) {
                 return -1;

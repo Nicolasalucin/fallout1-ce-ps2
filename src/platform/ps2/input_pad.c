@@ -30,17 +30,27 @@
 
 #include "ps2_input.h"
 
+#include "ps2_debug.h"
+#include "ps2_exception.h"
+#include "ps2_iop.h"
 #include "ps2_osk.h"
+#include "ps2_storage.h"
 #include "ps2_time.h"
 #include "sdl/ps2_sdl_internal.h"
 
 #include <math.h>
 #include <stdio.h>
 
+#include <delaythread.h>
 #include <tamtypes.h>
 #include <loadfile.h>
 #include <libpad.h>
 #include <sifrpc.h>
+
+extern const unsigned char g_ps2_sio2man_irx[];
+extern const unsigned int g_ps2_sio2man_irx_size;
+extern const unsigned char g_ps2_padman_irx[];
+extern const unsigned int g_ps2_padman_irx_size;
 
 #define PAD_PORT 0
 #define PAD_SLOT 0
@@ -96,6 +106,7 @@ static u16 s_prev_buttons = 0xFFFF;
 static int s_last_state = -1;
 static u32 s_last_poll;
 static u32 s_last_move_log;
+static u32 s_last_init_attempt;
 static float s_vel_x;
 static float s_vel_y;
 static float s_cursor_x;
@@ -104,29 +115,95 @@ static float s_wheel_x;
 static float s_wheel_y;
 static int s_r1_code = SDL_SCANCODE_A;
 
+static void input_load_pad_modules(void)
+{
+    SifInitRpc(0);
+
+    if (SifLoadModule("rom0:SIO2MAN", 0, NULL) < 0) {
+        ps2_irx_exec("sio2man.irx", g_ps2_sio2man_irx, g_ps2_sio2man_irx_size);
+    }
+    if (SifLoadModule("rom0:PADMAN", 0, NULL) < 0) {
+        ps2_irx_exec("padman.irx", g_ps2_padman_irx, g_ps2_padman_irx_size);
+    }
+}
+
+/* libpad configures the controller asynchronously. In host: mode there is no
+ * IOP reset and storage bring-up returns immediately, so the engine can start
+ * issuing fileio requests while PADMAN is still configuring the pad. Drain the
+ * state machine here so the initial controller handshake does not overlap the
+ * first game-data reads. */
+static int input_wait_pad_stable(unsigned int timeout_ms)
+{
+    unsigned int start = (unsigned int)ps2_time_ms();
+    int state = PAD_STATE_DISCONN;
+
+    while (((unsigned int)ps2_time_ms() - start) < timeout_ms) {
+        state = padGetState(PAD_PORT, PAD_SLOT);
+        if (state == PAD_STATE_STABLE) {
+            return 1;
+        }
+        if (state == PAD_STATE_ERROR) {
+            break;
+        }
+
+        DelayThread(2000); /* 2 ms */
+    }
+
+    printf("[ps2] pad: initial state %d after %u ms\n",
+        state, (unsigned int)((unsigned int)ps2_time_ms() - start));
+    PS2_LOG("[ps2] pad: initial state %d after %u ms",
+        state, (unsigned int)((unsigned int)ps2_time_ms() - start));
+
+    return 0;
+}
+
 void ps2_input_init(void)
 {
     int ret;
+    int did_reset;
 
-    /* ROM modules may already be resident; failures are harmless. */
+    s_last_init_attempt = ps2_time_ms();
+    s_pad_ready = 0;
+    s_first_read = 1;
+    s_prev_buttons = 0xFFFF;
+
+    /* After SifIopReset() ps2_iop_bringup() already loaded SIO2MAN/PADMAN;
+     * loading them again would restart PADMAN's async controller
+     * configuration. With host: (PCSX2/ps2link) the loader does not provide
+     * them, so they must be loaded here. */
+    did_reset = ps2_iop_did_reset();
     SifInitRpc(0);
-    SifLoadModule("rom0:SIO2MAN", 0, NULL);
-    SifLoadModule("rom0:PADMAN", 0, NULL);
+
+    if (!did_reset) {
+        input_load_pad_modules();
+    }
 
     ret = padInit(0);
     if (ret == 0) {
-        printf("[ps2] pad: padInit failed, no pad input\n");
+        PS2_LOG("[ps2] pad: padInit failed, loading fallback modules");
+        input_load_pad_modules();
+        ret = padInit(0);
+    }
+
+    if (ret == 0) {
+        printf("[ps2] pad: padInit failed, will retry\n");
+        PS2_LOG("[ps2] pad: padInit failed, will retry");
         return;
     }
 
     ret = padPortOpen(PAD_PORT, PAD_SLOT, s_pad_buf);
     if (ret == 0) {
-        printf("[ps2] pad: padPortOpen failed, no pad input\n");
+        printf("[ps2] pad: padPortOpen failed, will retry\n");
+        PS2_LOG("[ps2] pad: padPortOpen failed, will retry");
         return;
     }
 
     s_pad_ready = 1;
+    s_analog_ok = 0;
+    input_wait_pad_stable(2500);
+    ps2_exception_step("pad-ready", 0);
     printf("[ps2] pad: libpad up, probing port %d\n", PAD_PORT);
+    PS2_LOG("[ps2] pad: libpad up, probing port %d", PAD_PORT);
 }
 
 /* Deadzone + rescale to 0..1 preserving sign. */
@@ -398,6 +475,12 @@ void ps2_input_poll(void)
 #endif
 
     if (!s_pad_ready) {
+        /* A pad driver that was not ready during boot (or a reset that
+         * arrived late) is retried every two seconds without blocking the
+         * engine. */
+        if (now - s_last_init_attempt >= 2000) {
+            ps2_input_init();
+        }
         return;
     }
 

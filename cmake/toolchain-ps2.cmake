@@ -31,12 +31,21 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 set(CMAKE_C_COMPILER mips64r5900el-ps2-elf-gcc)
 set(CMAKE_CXX_COMPILER mips64r5900el-ps2-elf-g++)
+set(CMAKE_ASM_COMPILER mips64r5900el-ps2-elf-gcc)
 
-set(EE_CFLAGS "-I${PS2SDK}/ee/include -I${PS2SDK}/common/include -I${PS2DEV}/gsKit/include -I${PS2SDK}/ports/include -D_EE -DPS2 -D__PS2__ -G0" CACHE STRING "EE C compiler flags" FORCE)
-set(EE_LDFLAGS "-L${PS2SDK}/ee/lib -L${PS2DEV}/gsKit/lib -L${PS2SDK}/ports/lib -Wl,-zmax-page-size=128 -T${PS2SDK}/ee/startup/linkfile" CACHE STRING "EE linker flags" FORCE)
+# -mno-check-zero-division: the PS2 has no integer divide trap. GCC's
+# default check inserts a call and a break instruction on every division,
+# which turns a harmless divide-by-zero into a fatal exception. The engine
+# (and libc) already guard divisions where the result matters.
+set(EE_CFLAGS "-I${PS2SDK}/ee/include -I${PS2SDK}/common/include -I${PS2DEV}/gsKit/include -I${PS2SDK}/ports/include -D_EE -DPS2 -D__PS2__ -G0 -mno-check-zero-division" CACHE STRING "EE C compiler flags" FORCE)
+# _stack_size is an absolute linker symbol consumed by crt0.c (not a C
+# variable). 1 MB gives the engine, the VFS and the IOP loaders enough room
+# to survive deep call chains on real hardware.
+set(EE_LDFLAGS "-L${PS2SDK}/ee/lib -L${PS2DEV}/gsKit/lib -L${PS2SDK}/ports/lib -Wl,-zmax-page-size=128 -Wl,--defsym,_stack_size=0x100000 -T${PS2SDK}/ee/startup/linkfile" CACHE STRING "EE linker flags" FORCE)
 
 set(CMAKE_C_FLAGS_INIT ${EE_CFLAGS})
 set(CMAKE_CXX_FLAGS_INIT ${EE_CFLAGS})
+set(CMAKE_ASM_FLAGS_INIT ${EE_CFLAGS})
 set(CMAKE_EXE_LINKER_FLAGS_INIT ${EE_LDFLAGS})
 
 set(CMAKE_FIND_ROOT_PATH ${PS2DEV} ${PS2SDK} ${PS2SDK}/ports)
