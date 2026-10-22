@@ -1,5 +1,5 @@
 ==============================================================================
- FALLOUT for PlayStation 2 - Community Edition      v1.0.0
+ FALLOUT for PlayStation 2 - Community Edition      v1.0.1
  Unofficial, non-commercial native engine port. Bring your own game data.
 ==============================================================================
 
@@ -15,6 +15,23 @@ No copyrighted game assets are included in this release: no data files, no
 graphics, no audio, no text. The engine code is original work, and the game
 content must come from YOUR own legitimate copy of Fallout 1 (Steam, GOG or
 the original CD). If you do not own the game, please buy it.
+
+------------------------------------------------------------------------------
+ WHAT'S NEW IN v1.0.1
+------------------------------------------------------------------------------
+- Hardware-stable boot: clean IOP reset with automatic host:/PCSX2 bypass,
+  plus an optional NO_IOP_RESET marker for loaders that already own the IOP.
+- 1 MB main stack, divide-by-zero traps disabled, R5900 exception handlers and
+  a fatal-error screen with a crash log.
+- USB/MX4SIO/BDM probing for mass:, mass0:, mass1:, mass2: and mass3: without
+  opendir() on missing devices; case-insensitive MASTER.DAT/CRITTER.DAT.
+- GS/VRAM validation, PAL/NTSC auto-detection and optional PS2VIDEO.CFG
+  (mode=PAL or mode=NTSC).
+- Local ps2sdk SIF RPC hardening fixed for fileio reads: fioRead() now receives
+  its _fio_read_intr completion, so fallout.cfg loads reliably on strict PCSX2
+  and on real hardware.
+- Full hyper-strict PCSX2 smoke suite green (frontend, save/load, world tour,
+  dialogue, combat and pad hotkeys).
 
 ------------------------------------------------------------------------------
  INSTALLATION
@@ -53,6 +70,11 @@ without any configuration. Saves go to the Memory Card (mc0:, then mc1:),
 falling back to mass:/FALLOUT/saves/ when no card is present. The USB/MX4SIO
 drivers are embedded in the ELF, so a raw-ELF boot works even without OPL's
 IOP stack.
+
+If your loader already provides a working IOP stack and you prefer to keep it,
+place an empty NO_IOP_RESET file next to FALLOUT.ELF (for example
+mass:/FALLOUT/NO_IOP_RESET or mc0:/FALLOUT/NO_IOP_RESET). The port then skips
+the clean IOP reset and reuses the loader's modules.
 
 ------------------------------------------------------------------------------
  MODS & CUSTOM CONTENT

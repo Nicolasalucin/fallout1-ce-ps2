@@ -68,7 +68,13 @@ legal copy of Fallout to use this software (see
 
 ## Status
 
-**v1.0.0-rc1** — release candidate. All planned phases (F0–F9) have landed and the full smoke suite is green on PCSX2 (frontend, save/load with the on-screen keyboard, world tour, dialogue, combat, pad hotkeys):
+**v1.0.1** — stable hardware-hardening release. All planned phases (F0–F9) have landed and the full strict smoke suite is green on PCSX2 (frontend, save/load with the on-screen keyboard, world tour, dialogue, combat, pad hotkeys):
+
+- [x] Clean IOP reset with automatic `host:`/PCSX2 bypass and an optional `NO_IOP_RESET` marker.
+- [x] 1 MB main stack, `-mno-check-zero-division`, R5900 exception vectors, fatal screen and crash log.
+- [x] USB/MX4SIO/BDM `mass:`, `mass0:`…`mass3:` probing and case-insensitive `MASTER.DAT`/`CRITTER.DAT`.
+- [x] GS/VRAM validation, PAL/NTSC auto-detection and `PS2VIDEO.CFG` override.
+- [x] Fixed the local ps2sdk SIF RPC guard so `fioRead()` receives `_fio_read_intr`.
 
 - [x] F0 — Repository setup, legal hygiene, cross-build pipeline (Docker)
 - [x] F1 — Full engine compiles for MIPS / platform stubs
@@ -286,7 +292,13 @@ para usar este software (ver [Cómo usar tus propios datos legales]).
 
 ## Estado
 
-**v1.0.0-rc1** — release candidate. Todas las fases previstas (F0–F9) están completadas y la suite de smoke completa da verde en PCSX2 (frontend, guardado/carga con teclado en pantalla, world tour, diálogos, combate, atajos del pad):
+**v1.0.1** — release estable con blindaje de hardware. Todas las fases previstas (F0–F9) están completadas y la suite estricta completa da verde en PCSX2 (frontend, guardado/carga con teclado en pantalla, world tour, diálogos, combate, atajos del pad):
+
+- [x] Reset limpio del IOP con bypass automático en `host:`/PCSX2 y marcador opcional `NO_IOP_RESET`.
+- [x] Pila principal de 1 MB, `-mno-check-zero-division`, vectores de excepción R5900, pantalla fatal y log de crash.
+- [x] Sondeo USB/MX4SIO/BDM de `mass:`, `mass0:`…`mass3:` y rutas sin distinguir mayúsculas para `MASTER.DAT`/`CRITTER.DAT`.
+- [x] Validación de GS/VRAM, autodetección PAL/NTSC y override `PS2VIDEO.CFG`.
+- [x] Corrección del guard SIF RPC local de ps2sdk para que `fioRead()` reciba `_fio_read_intr`.
 
 - [x] F0 — Preparación del repositorio, higiene legal, build cruzado (Docker)
 - [x] F1 — El motor completo compila para MIPS / stubs de plataforma
