@@ -1,5 +1,5 @@
 ==============================================================================
- FALLOUT for PlayStation 2 - Community Edition      v1.1.0
+ FALLOUT for PlayStation 2 - Community Edition      v1.0.0
  Unofficial, non-commercial native engine port. Bring your own game data.
 ==============================================================================
 
