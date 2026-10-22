@@ -16,8 +16,9 @@
  *     to ship next to the game data.
  *
  * When a loader already provides I/O (OPL, uLaunchELF, ps2link, PCSX2 host
- * filesystem) the device answers before any module is touched and the IOP is
- * left alone; a module that is already resident is logged and ignored.
+ * filesystem) host: is detected first and the IOP is left alone. A loader
+ * that registers mass: still gets the active USB polling below: the mount
+ * point can exist before the USB 1.1 bus has finished renegotiating.
  */
 
 #ifdef __cplusplus
@@ -36,6 +37,11 @@ typedef struct ps2_storage_status {
 /* `argv0` may be NULL or empty; safe to call once at boot, before
  * ps2_fs_init(). */
 void ps2_storage_init(const char* argv0);
+
+/* True once the storage bring-up (including the active mass:/mc0: polling)
+ * has completed. ps2_debug_init() uses this to avoid probing mass:/mc0:
+ * before the IOP and USB stack exist. */
+int ps2_storage_is_initialized(void);
 
 /* Non-blocking existence probe (stat() first, open() as the fallback).
  * Unlike the old opendir() helper this also works for plain files, which is

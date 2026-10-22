@@ -39,6 +39,12 @@ extern "C" {
  * entry point calls it lazily, but ps2_boot() calls it eagerly for the log. */
 void ps2_fs_init(void);
 
+/* Re-runs the root probe from scratch. Use this when the storage stack
+ * mounted late (for example, a USB stick that appeared after the initial
+ * probe) or after a device change. Clears the directory-listing cache and
+ * the known roots before probing again. */
+void ps2_fs_reprobe(void);
+
 /* Number of usable data roots found (0 when nothing is mounted). */
 int ps2_fs_root_count(void);
 

@@ -552,6 +552,14 @@ static void fs_validate_root(const char* root)
     printf("[ps2] fs: data root %d = '%s'\n", s_root_count, root);
 }
 
+void ps2_fs_reprobe(void)
+{
+    s_probed = 0;
+    s_root_count = 0;
+    fs_dir_cache_invalidate();
+    ps2_fs_init();
+}
+
 void ps2_fs_init(void)
 {
     const char* elf_dir;
@@ -560,7 +568,6 @@ void ps2_fs_init(void)
     if (s_probed) {
         return;
     }
-    s_probed = 1;
 
     printf("[ps2] fs: probing game data devices...\n");
 
@@ -582,6 +589,7 @@ void ps2_fs_init(void)
     }
 
     if (s_root_count > 0) {
+        s_probed = 1;
         printf("[ps2] storage: asset root detected at %s\n", s_roots[0]);
         return;
     }
@@ -602,6 +610,15 @@ void ps2_fs_init(void)
             status.mc0 ? "yes" : "no",
             status.host ? "yes" : "no");
         PS2_LOG("[ps2] fs: devices: %s", devices);
+
+        /* fflush() alone does not update the directory-entry size on the
+         * ps2sdk FAT32 driver: the file is only committed when the last
+         * descriptor is closed. ps2_debug_sync() performs that close/reopen
+         * dance so the fatal reason is actually on the stick before the TV
+         * screen appears. */
+        ps2_debug_sync();
+        fflush(stdout);
+        fflush(stderr);
 
         ps2_fatal_show("GAME DATA NOT FOUND",
             "MASTER.DAT and CRITTER.DAT are required.",
