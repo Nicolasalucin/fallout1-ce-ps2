@@ -2,10 +2,11 @@
 #
 # Assembles the release bundle in dist/FALLOUT/.
 #
-# Builds the shipping ELF in a clean release configuration (Release, no smoke
-# harness), strips it with mips64r5900el-ps2-elf-strip and drops it next to
-# the checked-in SYSTEM.CNF and README_PS2.txt. Verifies the bundle (tree,
-# boot descriptor, smoke markers absent) and prints a SHA-256.
+# Builds the shipping ELF in a clean Release configuration (Release, no smoke
+# harness) with PS2_STRIP_ELF=ON, then copies the stripped build artifact to
+# dist/FALLOUT/FALLOUT.ELF next to the checked-in SYSTEM.CNF and
+# README_PS2.txt. Verifies the bundle (tree, boot descriptor, byte-identical
+# ELF, smoke markers absent) and prints a SHA-256.
 #
 # Usage: tools/make_dist.sh
 
@@ -46,7 +47,7 @@ docker exec "$CONTAINER" sh -c \
      -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchain-ps2.cmake \
      -DCMAKE_BUILD_TYPE=Release \
      -DPS2_DEV_SMOKE_TEST=OFF \
-     -DPS2_STRIP_ELF=OFF" || exit 1
+     -DPS2_STRIP_ELF=ON" || exit 1
 docker exec "$CONTAINER" sh -c "cmake --build /src/build_ps2_release -j4" || exit 1
 
 if [ ! -f "$BUILD_DIR/fallout1-ce.elf" ]; then
@@ -54,11 +55,17 @@ if [ ! -f "$BUILD_DIR/fallout1-ce.elf" ]; then
   exit 1
 fi
 
-# ----------------------------------------------------------------- strip ---
+# ---------------------------------------------------------------- package --
 mkdir -p "$DIST_DIR"
-say "stripping -> dist/FALLOUT/FALLOUT.ELF ..."
-docker exec "$CONTAINER" sh -c \
-  "mips64r5900el-ps2-elf-strip -o /src/dist/FALLOUT/FALLOUT.ELF /src/build_ps2_release/fallout1-ce.elf" || exit 1
+say "copying stripped ELF -> dist/FALLOUT/FALLOUT.ELF ..."
+cp -f "$BUILD_DIR/fallout1-ce.elf" "$DIST_DIR/FALLOUT.ELF" || exit 1
+
+# The shipped ELF must be exactly the stripped build artifact, not a stale
+# file left over from a previous release.
+if ! cmp -s "$BUILD_DIR/fallout1-ce.elf" "$DIST_DIR/FALLOUT.ELF"; then
+  say "ERROR: dist/FALLOUT/FALLOUT.ELF differs from the build artifact"
+  exit 1
+fi
 
 # ---------------------------------------------------------------- verify ---
 for f in FALLOUT.ELF SYSTEM.CNF README_PS2.txt; do

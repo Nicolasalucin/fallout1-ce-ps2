@@ -460,8 +460,8 @@ if(PS2)
     # several megabytes and every byte is read from USB on real hardware; the
     # loader only needs the program headers/loadable segments. This must run
     # after linking, and only in Release: a Debug build keeps its symbols.
-    # The smoke runner and make_dist.sh pass -DPS2_STRIP_ELF=OFF so they can
-    # symbolize crashes; make_dist.sh performs its own strip into dist/.
+    # The smoke runner passes -DPS2_STRIP_ELF=OFF so it can symbolize crashes;
+    # make_dist.sh passes ON and ships the stripped build artifact directly.
     if(CMAKE_BUILD_TYPE STREQUAL "Release" AND PS2_STRIP_ELF)
         add_custom_command(TARGET ${EXECUTABLE_NAME} POST_BUILD
             COMMAND "${PS2DEV}/ee/bin/mips64r5900el-ps2-elf-strip"
