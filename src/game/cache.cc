@@ -11,6 +11,9 @@
 
 namespace fallout {
 
+#define CACHE_LOOKUP_SIZE 1024
+static int s_cacheLookup[CACHE_LOOKUP_SIZE];
+
 static bool cache_add(Cache* cache, int key, int* indexPtr);
 static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index);
 static int cache_find(Cache* cache, int key, int* indexPtr);
@@ -22,6 +25,7 @@ static bool cache_reset_counter(Cache* cache);
 static bool cache_make_room(Cache* cache, int size);
 static bool cache_purge(Cache* cache);
 static bool cache_resize_array(Cache* cache, int newCapacity);
+static void cache_rebuild_lookup(Cache* cache);
 static int cache_compare_make_room(const void* a1, const void* a2);
 static int cache_compare_reset_counter(const void* a1, const void* a2);
 
@@ -50,6 +54,8 @@ bool cache_init(Cache* cache, CacheSizeProc* sizeProc, CacheReadProc* readProc, 
     }
 
     memset(cache->entries, 0, sizeof(*cache->entries) * cache->entriesCapacity);
+
+    for (int i = 0; i < CACHE_LOOKUP_SIZE; i++) s_cacheLookup[i] = -1;
 
     return true;
 }
@@ -455,7 +461,7 @@ static bool cache_add(Cache* cache, int key, int* indexPtr)
     return false;
 }
 
-// 0x41F2E8
+// 0x41F454
 static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index)
 {
     // Ensure cache have enough space for new entry.
@@ -472,6 +478,7 @@ static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index)
     cache->entriesLength++;
     cache->size += cacheEntry->size;
 
+    cache_rebuild_lookup(cache);
     return true;
 }
 
@@ -483,6 +490,17 @@ static bool cache_insert(Cache* cache, CacheEntry* cacheEntry, int index)
 // 0x41F354
 static int cache_find(Cache* cache, int key, int* indexPtr)
 {
+    /* Direct-mapped lookup table (O(1) with fallback to binary search). */
+    int idx = key & (CACHE_LOOKUP_SIZE - 1);
+    int cached = s_cacheLookup[idx];
+    if (cached >= 0 && cached < cache->entriesLength) {
+        if (cache->entries[cached]->key == key) {
+            *indexPtr = cached;
+            return 2;
+        }
+        /* Collision: fall through to binary search. */
+    }
+
     int length = cache->entriesLength;
     if (length == 0) {
         *indexPtr = 0;
@@ -500,6 +518,8 @@ static int cache_find(Cache* cache, int key, int* indexPtr)
         cmp = key - cache->entries[mid]->key;
         if (cmp == 0) {
             *indexPtr = mid;
+            /* Repair lookup table for next hit. */
+            s_cacheLookup[idx] = mid;
             return 2;
         }
 
@@ -684,6 +704,17 @@ static bool cache_make_room(Cache* cache, int size)
 }
 
 // 0x41F69C
+static void cache_rebuild_lookup(Cache* cache)
+{
+    for (int i = 0; i < CACHE_LOOKUP_SIZE; i++) {
+        s_cacheLookup[i] = -1;
+    }
+    for (int i = 0; i < cache->entriesLength; i++) {
+        int idx = cache->entries[i]->key & (CACHE_LOOKUP_SIZE - 1);
+        s_cacheLookup[idx] = i;
+    }
+}
+
 static bool cache_purge(Cache* cache)
 {
     for (int index = 0; index < cache->entriesLength; index++) {
@@ -711,6 +742,7 @@ static bool cache_purge(Cache* cache)
         }
     }
 
+    cache_rebuild_lookup(cache);
     return true;
 }
 
